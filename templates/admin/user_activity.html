@@ -1,14 +1,8 @@
-{% extends "base.html" %}
+{% extends "admin/_layout.html" %}
 
 {% block title %}{{ user.username }} - Activity - Admin - {{ ctf_name }}{% endblock %}
 
-{% block content %}
-<div class="row">
-    <div class="col-md-3">
-        {% include 'admin/_sidebar.html' %}
-    </div>
-    
-    <div class="col-md-9">
+{% block admin_content %}
         <!-- Header -->
         <div class="d-flex justify-content-between align-items-center mb-4">
             <div>
@@ -203,6 +197,34 @@
             </div>
         </div>
         
+        <section class="card mb-4" aria-labelledby="recent-submissions">
+            <div class="card-header">
+                <h2 class="h5 mb-0" id="recent-submissions">Recent submissions</h2>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr><th>Time</th><th>Team</th><th>Challenge</th><th>Flag submitted</th><th>Result</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for submission in recent_submissions %}
+                            <tr>
+                                <td class="text-nowrap">{{ submission.submitted_at|format_datetime }}</td>
+                                <td>{{ submission.team.name if submission.team else '—' }}</td>
+                                <td>{{ submission.challenge.name if submission.challenge else 'Unknown' }}</td>
+                                <td><code class="text-break">{{ submission.submitted_flag }}</code></td>
+                                <td><span class="badge {{ 'bg-success' if submission.is_correct else 'bg-danger' }}">{{ 'Correct' if submission.is_correct else 'Incorrect' }}</span></td>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="5" class="text-center text-muted py-4">No submissions yet.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
         <!-- Hints Unlocked -->
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -298,8 +320,7 @@
                 </button>
             </div>
         </div>
-    </div>
-</div>
+
 
 <script>
 const userId = {{ user.id }};

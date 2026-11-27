@@ -1,14 +1,8 @@
-{% extends "base.html" %}
+{% extends "admin/_layout.html" %}
 
 {% block title %}Manage Challenges - Admin - {{ ctf_name }}{% endblock %}
 
-{% block content %}
-<div class="row">
-    <div class="col-md-3">
-        {% include 'admin/_sidebar.html' %}
-    </div>
-    
-    <div class="col-md-9">
+{% block admin_content %}
         <div class="d-flex justify-content-between align-items-center mb-4">
             <h2 class="mb-0">
                 <i class="bi bi-puzzle"></i> Challenges
@@ -122,8 +116,7 @@
             <a href="{{ url_for('admin.create_challenge') }}">Create your first challenge</a>
         </div>
         {% endif %}
-    </div>
-</div>
+
 
 <script>
 function toggleEnabled(id, currentlyEnabled) {

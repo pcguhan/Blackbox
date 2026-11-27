@@ -12,11 +12,37 @@ from models.hint import Hint, HintUnlock
 from models.settings import Settings
 from services.cache import cache_service
 from services.file_storage import file_storage
+from services.admin_console import (
+    active_containers_query, console_filter_args, csv_download, hint_log_rows, hint_unlocks_query,
+    submissions_query, users_query,
+)
 import json
+import re
 from models.notification import Notification
 from services.websocket import WebSocketService
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
+
+DEFAULT_FLAG_PREFIX = 'CYS'
+FLAG_PREFIX_PATTERN = r'[A-Za-z0-9][A-Za-z0-9_-]{0,31}'
+
+
+def _flag_format_prefix():
+    prefix = Settings.get('flag_format_prefix', DEFAULT_FLAG_PREFIX)
+    return prefix if re.fullmatch(FLAG_PREFIX_PATTERN, prefix) else DEFAULT_FLAG_PREFIX
+
+
+def _valid_new_flag(flag, is_regex, prefix):
+    if not flag or len(flag) > 255:
+        return False
+    if is_regex:
+        try:
+            re.compile(flag)
+        except re.error:
+            return False
+        return True
+    return bool(re.fullmatch(re.escape(prefix) + r'\{[^{}\r\n]+\}', flag))
+
 
 def admin_required(f):
     """Decorator to require admin access"""
@@ -44,7 +70,9 @@ def dashboard():
     }
     
     # Recent activity
-    recent_solves = Solve.query.order_by(Solve.solved_at.desc()).limit(10).all()
+    recent_solves = Solve.query.filter(Solve.challenge_id.isnot(None)).order_by(
+        Solve.solved_at.desc(), Solve.id.desc()
+    ).limit(10).all()
     
     return render_template('admin/dashboard.html', stats=stats, recent_solves=recent_solves)
 
@@ -83,11 +111,23 @@ def create_challenge():
     """Create a new challenge"""
     # Check if ACT system is enabled
     act_system_enabled = Settings.get('act_system_enabled', default=False, type='bool')
+    flag_format_prefix = _flag_format_prefix()
     
     if request.method == 'POST':
         from models.branching import ChallengeFlag
         
         data = request.form
+        additional_flags = data.getlist('additional_flags[]')
+        flag_is_regex = data.getlist('flag_is_regex[]')
+        flags_to_validate = [(data.get('flag'), data.get('is_regex') == 'true')]
+        flags_to_validate.extend(
+            (flag.strip(), i < len(flag_is_regex) and flag_is_regex[i] == 'true')
+            for i, flag in enumerate(additional_flags) if flag.strip()
+        )
+        if not all(_valid_new_flag(flag, is_regex, flag_format_prefix) for flag, is_regex in flags_to_validate):
+            flash(f'Enter flags in {flag_format_prefix}{{...}} format or provide a valid regex pattern.', 'error')
+            return render_template('admin/create_challenge.html', act_system_enabled=act_system_enabled,
+                                   flag_format_prefix=flag_format_prefix), 400
         
         # Only set ACT fields if ACT system is enabled
         act_value = data.get('act', 'ACT I') if act_system_enabled else None
@@ -113,7 +153,10 @@ def create_challenge():
             unlocks_act=unlocks_act_value,
             # Docker fields
             docker_enabled=data.get('docker_enabled') == 'true',
-            docker_image=data.get('docker_image') if data.get('docker_enabled') == 'true' else None,
+            docker_image=(
+                data.get('docker_image_manual') if data.get('docker_image') in ('', 'custom', None)
+                else data.get('docker_image')
+            ) if data.get('docker_enabled') == 'true' else None,
             docker_connection_info=data.get('docker_connection_info') if data.get('docker_enabled') == 'true' else None,
             docker_flag_path=data.get('docker_flag_path') if data.get('docker_enabled') == 'true' else None,
             detect_regex_sharing=data.get('detect_regex_sharing') == 'true'
@@ -133,11 +176,9 @@ def create_challenge():
         db.session.add(primary_flag)
         
         # Handle additional flags
-        additional_flags = request.form.getlist('additional_flags[]')
         flag_labels = request.form.getlist('flag_labels[]')
         flag_points = request.form.getlist('flag_points[]')
         flag_cases = request.form.getlist('flag_case[]')
-        flag_is_regex = request.form.getlist('flag_is_regex[]')
         
         for i in range(len(additional_flags)):
             if additional_flags[i].strip():
@@ -261,7 +302,8 @@ def create_challenge():
         
         return redirect(url_for('admin.manage_challenges'))
     
-    return render_template('admin/create_challenge.html', act_system_enabled=act_system_enabled)
+    return render_template('admin/create_challenge.html', act_system_enabled=act_system_enabled,
+                           flag_format_prefix=flag_format_prefix)
 
 @admin_bp.route('/challenges/<int:challenge_id>/edit', methods=['GET', 'POST'])
 @login_required
@@ -538,6 +580,7 @@ def edit_challenge(challenge_id):
                           existing_hints=existing_hints,
                           primary_flag=primary_flag,
                           additional_flags=additional_flags,
+                          flag_format_prefix=_flag_format_prefix(),
                           act_system_enabled=act_system_enabled)
 
 
@@ -730,8 +773,11 @@ def delete_challenge_flag(flag_id):
 @admin_required
 def manage_users():
     """Manage users page"""
-    users = User.query.all()
-    return render_template('admin/users.html', users=users)
+    users = users_query(request.args).all()
+    return render_template(
+        'admin/users.html', users=users, teams=Team.query.order_by(Team.name).all(),
+        filter_args=console_filter_args(request.args, 'q', 'role', 'status', 'user_id', 'team_id'),
+    )
 
 
 @admin_bp.route('/users/<int:user_id>/toggle-admin', methods=['POST'])
@@ -950,11 +996,15 @@ def user_activity(user_id):
     total_submissions = Submission.query.filter_by(user_id=user_id).count()
     total_hints = len(hints_unlocked)
     total_score = user.get_score()
+    recent_submissions = user.submissions.order_by(
+        Submission.submitted_at.desc(), Submission.id.desc()
+    ).limit(10).all()
     
     return render_template('admin/user_activity.html', 
                           user=user,
                           solves_pagination=solves_pagination,
                           hints_unlocked=hints_unlocked,
+                          recent_submissions=recent_submissions,
                           total_solves=total_solves,
                           total_submissions=total_submissions,
                           total_hints=total_hints,
@@ -1061,6 +1111,7 @@ def settings():
                          flask_version=flask.__version__,
                          get_flask_version=lambda: flask.__version__,
                          ctf_settings=ctf_settings,
+                         flag_format_prefix=_flag_format_prefix(),
                          settings=all_settings)
 
 
@@ -1068,11 +1119,17 @@ def settings():
 @login_required
 @admin_required
 def update_event_config():
-    """Update event configuration (name, logo, description)"""
+    """Save only the event and scoring settings supplied by the form."""
     from models.settings import Settings
     import os
     from werkzeug.utils import secure_filename
     
+    form = request.form
+    prefix = form.get('flag_format_prefix', '').strip()
+    if prefix and not re.fullmatch(FLAG_PREFIX_PATTERN, prefix):
+        flash('Use 1–32 letters, digits, underscores or hyphens for the flag prefix. Start with a letter or digit.', 'error')
+        return redirect(url_for('admin.settings'))
+
     try:
         # Update CTF name
         ctf_name = request.form.get('ctf_name', '').strip()
@@ -1080,42 +1137,47 @@ def update_event_config():
             Settings.set('ctf_name', ctf_name, 'string', 'Name of the CTF event')
         
         # Update CTF description
-        ctf_description = request.form.get('ctf_description', '').strip()
-        if ctf_description:
-            Settings.set('ctf_description', ctf_description, 'string', 'Description of the CTF event')
-        
-        # Update registration and team mode settings
-        allow_registration = 'allow_registration' in request.form
-        Settings.set('allow_registration', allow_registration, 'bool', 'Allow new user registrations')
-        
-        teams_enabled = 'teams_enabled' in request.form
-        Settings.set('teams_enabled', teams_enabled, 'bool', 'Enable teams feature (for solo competitions)')
-        
-        team_mode = 'team_mode' in request.form
-        Settings.set('team_mode', team_mode, 'bool', 'Enable team-based CTF mode')
-        
-        # Update scoreboard visibility
-        scoreboard_visible = 'scoreboard_visible' in request.form
-        Settings.set('scoreboard_visible', scoreboard_visible, 'bool', 'Show scoreboard to users')
-        from services.websocket import socketio
-        socketio.emit('scoreboard_visibility', {'visible': scoreboard_visible}, namespace='/live', to='scoreboard_authenticated')
-        
-        from services.standings import set_frozen, frozen_snapshot
-        set_frozen('scoreboard_frozen' in request.form)
-        socketio.emit('scoreboard_freeze', {'frozen': bool(frozen_snapshot())}, namespace='/live', to='scoreboard_authenticated')
+        for key, description in (
+            ('ctf_description', 'Description of the CTF event'),
+            ('event_subtitle', 'Subtitle shown on the event welcome page'),
+        ):
+            if key in form:
+                Settings.set(key, form[key].strip(), 'string', description)
+        if 'flag_format_prefix' in form:
+            Settings.set('flag_format_prefix', prefix or DEFAULT_FLAG_PREFIX, 'string', 'Prefix for new challenge flags')
+
+        # Hidden inputs supply false for unchecked switches. Missing fields belong to other forms.
+        for key, description in (
+            ('allow_registration', 'Allow new user registrations'),
+            ('teams_enabled', 'Enable teams feature'),
+            ('team_mode', 'Require teams to solve challenges'),
+            ('scoreboard_visible', 'Show scoreboard to users'),
+        ):
+            if key in form:
+                enabled = form.getlist(key)[-1].lower() in ('true', '1', 'yes', 'on')
+                Settings.set(key, enabled, 'bool', description)
+                if key == 'scoreboard_visible':
+                    from services.websocket import socketio
+                    socketio.emit('scoreboard_visibility', {'visible': enabled}, namespace='/live', to='scoreboard_authenticated')
 
         # Update first blood bonus
-        first_blood_bonus = request.form.get('first_blood_bonus', '0')
-        try:
-            first_blood_bonus = int(first_blood_bonus)
+        first_blood_bonus = form.get('first_blood_bonus', type=int)
+        if first_blood_bonus is not None and 0 <= first_blood_bonus <= 500:
             Settings.set('first_blood_bonus', first_blood_bonus, 'int', 'Bonus points for first blood')
-        except ValueError:
-            pass  # Ignore invalid values
         
         # Update decay function
-        decay_function = request.form.get('decay_function', 'logarithmic')
+        decay_function = form.get('decay_function')
         if decay_function in ['logarithmic', 'parabolic']:
             Settings.set('decay_function', decay_function, 'string', 'Dynamic scoring decay function')
+            cache_service.invalidate_all_challenges()
+        if 'first_blood_bonus' in form or 'decay_function' in form:
+            cache_service.invalidate_scoreboard()
+
+        if 'scoreboard_frozen' in form:
+            from services.standings import set_frozen, frozen_snapshot
+            from services.websocket import socketio
+            set_frozen(form.getlist('scoreboard_frozen')[-1].lower() in ('true', '1', 'yes', 'on'))
+            socketio.emit('scoreboard_freeze', {'frozen': bool(frozen_snapshot())}, namespace='/live', to='scoreboard_authenticated')
         
         # Handle logo upload
         if 'ctf_logo' in request.files:
@@ -1145,7 +1207,7 @@ def update_event_config():
                 # Store relative path in settings
                 Settings.set('ctf_logo', filename, 'string', 'Path to CTF logo image')
         
-        flash('Event configuration updated successfully!', 'success')
+        flash('Settings saved.', 'success')
     except Exception as e:
         flash(f'Error updating configuration: {str(e)}', 'error')
     
@@ -1699,14 +1761,18 @@ def get_branching_connections():
 def hint_logs():
     """View hint unlock logs"""
     page = request.args.get('page', 1, type=int)
-    per_page = 50
-    
-    # Get all hint unlocks with pagination
-    hint_unlocks = HintUnlock.query.order_by(HintUnlock.unlocked_at.desc()).paginate(
-        page=page, per_page=per_page, error_out=False
+    query = hint_unlocks_query(request.args)
+    total_cost, unique_users = query.with_entities(
+        db.func.coalesce(db.func.sum(HintUnlock.cost_paid), 0),
+        db.func.count(db.distinct(HintUnlock.user_id)),
+    ).one()
+    hint_unlocks = hint_log_rows(query).paginate(page=page, per_page=50, error_out=False)
+    return render_template(
+        'admin/hint_logs.html', hint_unlocks=hint_unlocks, total_cost=total_cost, unique_users=unique_users,
+        pagination_args=console_filter_args(
+            request.args, 'user', 'team', 'challenge', 'user_id', 'team_id', 'challenge_id', 'start_date', 'end_date'
+        ),
     )
-    
-    return render_template('admin/hint_logs.html', hint_unlocks=hint_unlocks)
 
 
 @admin_bp.route('/hint-logs/api')
@@ -1716,21 +1782,7 @@ def hint_logs_api():
     """Get hint unlock logs as JSON"""
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 50, type=int)
-    user_id = request.args.get('user_id', type=int)
-    team_id = request.args.get('team_id', type=int)
-    challenge_id = request.args.get('challenge_id', type=int)
-    
-    query = HintUnlock.query
-    
-    # Apply filters
-    if user_id:
-        query = query.filter_by(user_id=user_id)
-    if team_id:
-        query = query.filter_by(team_id=team_id)
-    if challenge_id:
-        query = query.join(Hint).filter(Hint.challenge_id == challenge_id)
-    
-    hint_unlocks = query.order_by(HintUnlock.unlocked_at.desc()).paginate(
+    hint_unlocks = hint_log_rows(hint_unlocks_query(request.args)).paginate(
         page=page, per_page=per_page, error_out=False
     )
     
@@ -2572,18 +2624,7 @@ def list_docker_images():
 @admin_required
 def dynamic_flags_monitor():
     """Admin interface to monitor and verify dynamic flags for all active containers"""
-    from models.container import ContainerInstance
-    from services.cache import cache_service
-    
-    # Get all active containers (running or starting)
-    active_containers = ContainerInstance.query.filter(
-        ContainerInstance.status.in_(['starting', 'running'])
-    ).order_by(ContainerInstance.created_at.desc()).all()
-    
-    # Get all containers (including stopped) for verification history
-    all_containers = ContainerInstance.query.order_by(
-        ContainerInstance.created_at.desc()
-    ).limit(100).all()
+    active_containers = active_containers_query(request.args).all()
     
     # Build detailed container info with flag data
     container_data = []
@@ -2614,6 +2655,10 @@ def dynamic_flags_monitor():
                 'id': container.id,
                 'session_id': container.session_id,
                 'container_id': container.container_id,
+                'container_name': container.container_name,
+                'host_ip': container.host_ip,
+                'host_port': container.host_port,
+                'port': container.port,
                 'docker_image': container.docker_image or '',
                 'status': container.status,
                 'created_at': container.created_at.isoformat() if container.created_at else None,
@@ -2635,9 +2680,7 @@ def dynamic_flags_monitor():
                 'mapping': bool(cached_mapping),
                 'session': bool(session_cache)
             },
-            'is_consistent': (
-                container.dynamic_flag == expected_flag if expected_flag else True
-            ),
+            'is_consistent': len({flag for flag in (container.dynamic_flag, cached_mapping, session_cache) if flag}) <= 1,
             'remaining_time': container.get_remaining_time(),
             'is_expired': container.is_expired()
         })
@@ -2645,40 +2688,74 @@ def dynamic_flags_monitor():
     return render_template('admin/dynamic_flags.html', 
                          containers=container_data,
                          active_count=len(active_containers),
-                         total_count=len(all_containers))
+                         unique_count=len({row['expected_flag'] for row in container_data if row['expected_flag']}),
+                         flag_format_prefix=_flag_format_prefix(),
+                         challenges=Challenge.query.filter_by(docker_enabled=True).order_by(Challenge.name).all(),
+                         users=User.query.order_by(User.username).all(),
+                         teams=Team.query.order_by(Team.name).all(),
+                         filter_args=console_filter_args(request.args, 'challenge_id', 'user_id', 'team_id', 'status'))
 
 
 @admin_bp.route('/dynamic-flags/verify', methods=['POST'])
 @login_required
 @admin_required
 def verify_dynamic_flag():
-    """API endpoint to verify a submitted flag against a specific container"""
+    """Verify a flag against a container or a Docker challenge and its owner."""
+    import hmac
     from models.container import ContainerInstance
-    
-    data = request.get_json()
+    from utils.flag_hmac import generate_hmac_flag
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(success=False, error='Expected a JSON object'), 400
     container_id = data.get('container_id')
     submitted_flag = data.get('submitted_flag')
-    
-    if not container_id or not submitted_flag:
-        return jsonify({
-            'success': False,
-            'error': 'container_id and submitted_flag are required'
-        }), 400
-    
-    container = ContainerInstance.query.get(container_id)
-    if not container:
-        return jsonify({
-            'success': False,
-            'error': 'Container not found'
-        }), 404
-    
-    # Verify the flag
-    verification = container.verify_flag(submitted_flag)
-    
-    return jsonify({
-        'success': True,
-        'verification': verification,
-        'container': {
+    if not isinstance(submitted_flag, str) or not submitted_flag.strip():
+        return jsonify(success=False, error='Enter a flag to verify'), 400
+
+    container = None
+    if container_id is not None:
+        if type(container_id) is not int:
+            return jsonify(success=False, error='Invalid container ID'), 400
+        container = db.session.get(ContainerInstance, container_id)
+        if container is None:
+            return jsonify(success=False, error='Container not found'), 404
+        challenge, user, team_id = container.challenge, container.user, container.team_id
+        expected = container.get_expected_flag()
+    else:
+        user_id, challenge_id = data.get('user_id'), data.get('challenge_id')
+        if type(user_id) is not int or type(challenge_id) is not int:
+            return jsonify(success=False, error='Select a user and a Docker challenge'), 400
+        user, challenge = db.session.get(User, user_id), db.session.get(Challenge, challenge_id)
+        if not user or not challenge or not challenge.docker_enabled:
+            return jsonify(success=False, error='User or Docker challenge not found'), 404
+        team_id = user.team_id
+        owner = f'team_{team_id}' if team_id else f'user_{user.id}'
+        instances = ContainerInstance.query.filter_by(challenge_id=challenge.id, team_id=team_id)
+        if not team_id:
+            instances = instances.filter_by(user_id=user.id)
+        active = instances.filter(ContainerInstance.status.in_(('starting', 'running'))).order_by(
+            ContainerInstance.created_at.desc(), ContainerInstance.id.desc()
+        ).first()
+        expected = active.get_expected_flag() if active else None
+        if not expected:
+            expected = cache_service.get(f'dynamic_flag_mapping:{challenge.id}:{owner}')
+
+    if not expected and challenge and user:
+        prefix, separator, _ = challenge.flag.partition('{')
+        expected = generate_hmac_flag(challenge.id, team_id, user.id, prefix if separator else DEFAULT_FLAG_PREFIX)
+
+    submitted = submitted_flag.strip()
+    comparison = expected or ''
+    if challenge and not challenge.flag_case_sensitive:
+        comparison, submitted = comparison.lower(), submitted.lower()
+    result = {'success': True, 'verification': {
+        'valid': bool(expected) and hmac.compare_digest(comparison.encode(), submitted.encode()),
+        'expected': expected,
+        'submitted': submitted_flag,
+    }}
+    if container:
+        result['container'] = {
             'id': container.id,
             'challenge_name': container.challenge.name if container.challenge else 'Unknown',
             'team_name': container.team.name if container.team else 'Solo',
@@ -2686,7 +2763,7 @@ def verify_dynamic_flag():
             'status': container.status,
             'is_expired': container.is_expired()
         }
-    })
+    return jsonify(result)
 
 
 @admin_bp.route('/dynamic-flags/check-uniqueness', methods=['POST'])
@@ -2834,32 +2911,8 @@ def analyze_cheating():
 @login_required
 @admin_required
 def submissions():
-    from models.submission import Submission
-    from models.user import User
-    from models.challenge import Challenge
-
     page = request.args.get('page', 1, type=int)
-    challenge_id = request.args.get('challenge_id', None, type=int)
-    user_id = request.args.get('user_id', None, type=int)
-    correct_only = request.args.get('correct_only', None)
-
-    from sqlalchemy.orm import joinedload
-    from models.challenge import Challenge
-    challenge_type = request.args.get('challenge_type', '')
-    query = Submission.query.options(joinedload(Submission.user), joinedload(Submission.team), joinedload(Submission.challenge))
-    if challenge_type in ('dynamic', 'static'):
-        query = query.filter(Submission.challenge.has(Challenge.docker_enabled == (challenge_type == 'dynamic')))
-
-    if challenge_id:
-        query = query.filter(Submission.challenge_id == challenge_id)
-    if user_id:
-        query = query.filter(Submission.user_id == user_id)
-    if correct_only == '1':
-        query = query.filter(Submission.is_correct == True)
-    elif correct_only == '0':
-        query = query.filter(Submission.is_correct == False)
-
-    submissions = query.order_by(Submission.submitted_at.desc()).paginate(
+    submissions = submissions_query(request.args).paginate(
         page=page, per_page=50, error_out=False
     )
 
@@ -2870,47 +2923,23 @@ def submissions():
                            submissions=submissions,
                            challenges=challenges,
                            users=users,
-                           pagination_args={key: value for key, value in request.args.items() if key != 'page'})
+                           teams=Team.query.order_by(Team.name).all(),
+                           pagination_args=console_filter_args(
+                               request.args, 'challenge_id', 'user_id', 'team_id', 'correct_only',
+                               'challenge_type', 'start_date', 'end_date'
+                           ))
 
 
 @admin_bp.route('/submissions/export')
 @login_required
 @admin_required
 def export_submissions():
-    import csv
-    import io
-    from models.submission import Submission
-    from flask import Response
+    from utils.timezone import format_datetime
 
-    challenge_id = request.args.get('challenge_id', None, type=int)
-    user_id = request.args.get('user_id', None, type=int)
-    correct_only = request.args.get('correct_only', None)
-
-    from sqlalchemy.orm import joinedload
-    from models.challenge import Challenge
-    challenge_type = request.args.get('challenge_type', '')
-    query = Submission.query.options(joinedload(Submission.user), joinedload(Submission.team), joinedload(Submission.challenge))
-    if challenge_type in ('dynamic', 'static'):
-        query = query.filter(Submission.challenge.has(Challenge.docker_enabled == (challenge_type == 'dynamic')))
-    if challenge_id:
-        query = query.filter(Submission.challenge_id == challenge_id)
-    if correct_only == '1':
-        query = query.filter(Submission.is_correct == True)
-    elif correct_only == '0':
-        query = query.filter(Submission.is_correct == False)
-
-    if user_id:
-        query = query.filter(Submission.user_id == user_id)
-    subs = query.order_by(Submission.submitted_at.desc()).all()
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['ID', 'Time', 'Username', 'Team', 'Challenge', 'Challenge Type', 'Flag Submitted', 'Correct', 'IP Address'])
-
-    for s in subs:
-        writer.writerow([
+    rows = (
+        (
             s.id,
-            s.submitted_at.strftime('%Y-%m-%d %H:%M:%S') if s.submitted_at else '',
+            format_datetime(s.submitted_at) if s.submitted_at else '',
             s.user.username if s.user else s.user_id,
             s.team.name if s.team else '',
             s.challenge.name if s.challenge else s.challenge_id,
@@ -2918,11 +2947,9 @@ def export_submissions():
             s.submitted_flag,
             'Yes' if s.is_correct else 'No',
             s.ip_address or ''
-        ])
-
-    output.seek(0)
-    return Response(
-        output.getvalue(),
-        mimetype='text/csv',
-        headers={'Content-Disposition': 'attachment; filename=submissions.csv'}
+        )
+        for s in submissions_query(request.args)
     )
+    return csv_download('submissions', (
+        'ID', 'Time', 'Username', 'Team', 'Challenge', 'Challenge Type', 'Flag Submitted', 'Correct', 'IP Address',
+    ), rows)

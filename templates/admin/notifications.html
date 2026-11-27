@@ -1,20 +1,20 @@
-{% extends 'base.html' %}
+{% extends 'admin/_layout.html' %}
+{% from "admin/_macros.html" import page_heading %}
 {% block title %}Admin - Notifications{% endblock %}
-{% block content %}
-<div class="row">
-    <div class="col-md-3">
-        {% include 'admin/_sidebar.html' %}
-    </div>
-    <div class="col-md-9">
-        <h3>Send Notification</h3>
+{% block admin_content %}
+        {{ page_heading('Notifications', 'bell') }}
+        <section class="card mb-4" aria-labelledby="send-notification">
+        <div class="card-header"><h2 class="h5 mb-0" id="send-notification">Send notification</h2></div>
+        <div class="card-body">
         <form method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="mb-3">
-                <label class="form-label">Title</label>
-                <input type="text" name="title" class="form-control" required>
+                <label for="notification-title" class="form-label">Title</label>
+                <input type="text" id="notification-title" name="title" class="form-control" required>
             </div>
             <div class="mb-3">
-                <label class="form-label">Message</label>
-                <textarea name="body" class="form-control" rows="5" required></textarea>
+                <label for="notification-message" class="form-label">Message</label>
+                <textarea id="notification-message" name="body" class="form-control" rows="5" required></textarea>
             </div>
             <div class="form-check mb-3">
                 <input class="form-check-input" type="checkbox" value="true" id="play_sound" name="play_sound" checked>
@@ -22,16 +22,18 @@
             </div>
             <button class="btn btn-primary">Send to All</button>
         </form>
+        </div>
+        </section>
 
-        <hr/>
-        <h4>Recent Notifications</h4>
+        <section class="card" aria-labelledby="recent-notifications">
+        <div class="card-header"><h2 class="h5 mb-0" id="recent-notifications">Recent notifications</h2></div>
         <ul class="list-group">
             {% for n in notifications %}
             <li class="list-group-item" data-notif-id="{{ n.id }}">
                 <div class="d-flex justify-content-between">
                     <div>
                         <strong>{{ n.title }}</strong>
-                        <div class="small text-muted">{{ n.created_at | default('') }}</div>
+                        <div class="small text-muted">{{ n.created_at|format_datetime }}</div>
                     </div>
                     <div>
                         <small class="text-muted">Play sound: {{ 'Yes' if n.play_sound else 'No' }}</small>
@@ -46,9 +48,10 @@
             <li class="list-group-item">No notifications sent yet.</li>
             {% endfor %}
         </ul>
-    </div>
-</div>
-<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+        </section>
+{% endblock %}
+
+{% block extra_js %}
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     // Connect to websocket to receive deletion events in real-time

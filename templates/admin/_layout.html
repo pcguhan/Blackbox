@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/admin-console.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="admin-workspace">
+    <aside class="admin-rail">
+        {% include 'admin/_sidebar.html' %}
+    </aside>
+    <div class="admin-workspace-content">
+        {% block admin_content %}{% endblock %}
+    </div>
+</div>
+{% endblock %}

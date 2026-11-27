@@ -1,163 +1,87 @@
-{% extends "base.html" %}
+{% extends "admin/_layout.html" %}
+{% from "admin/_macros.html" import page_heading, setting_switch %}
 
 {% block title %}Settings - Admin - {{ ctf_name }}{% endblock %}
 
-{% block content %}
-<div class="container-fluid mt-4">
-    <div class="row">
-        <!-- Sidebar -->
-        <div class="col-md-2">
-            {% include 'admin/_sidebar.html' %}
-        </div>
-        
-        <!-- Main Content -->
-        <div class="col-md-10">
-            <h2 class="mb-4">
-                <i class="bi bi-gear"></i> Settings
-            </h2>
-            
-            <!-- Event Configuration -->
-            <div class="card mb-4">
-                <div class="card-header bg-primary text-white">
-                    <h5 class="mb-0"><i class="bi bi-trophy"></i> Event Configuration</h5>
+{% block admin_content %}
+
+{{ page_heading('Settings', 'gear') }}
+
+<section class="card mb-4" aria-labelledby="event-settings">
+    <div class="card-header"><h2 class="h5 mb-0" id="event-settings">Event</h2></div>
+    <div class="card-body">
+        <form method="post" action="{{ url_for('admin.update_event_config') }}" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="row mb-3">
+                <div class="col-md-6">
+                    <label for="ctf_name" class="form-label">CTF name</label>
+                    <input class="form-control" id="ctf_name" name="ctf_name" value="{{ settings.get('ctf_name', 'CYSCOM') }}" required>
                 </div>
-                <div class="card-body">
-                    {% with messages = get_flashed_messages(with_categories=true) %}
-                        {% if messages %}
-                            {% for category, message in messages %}
-                                <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
-                                    {{ message }}
-                                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                                </div>
-                            {% endfor %}
-                        {% endif %}
-                    {% endwith %}
-                    
-                    <form method="POST" action="{{ url_for('admin.update_event_config') }}" enctype="multipart/form-data">
-                        <div class="row">
-                            <div class="col-md-6 mb-3">
-                                <label for="ctf_name" class="form-label"><strong>CTF Name</strong></label>
-                                <input type="text" class="form-control" id="ctf_name" name="ctf_name" 
-                                       value="{{ settings.get('ctf_name', 'Capture The Flag') }}" required>
-                                <div class="form-text">The name of your CTF event</div>
-                            </div>
-                            
-                            <div class="col-md-6 mb-3">
-                                <label for="ctf_logo" class="form-label"><strong>CTF Logo</strong></label>
-                                <input type="file" class="form-control" id="ctf_logo" name="ctf_logo" accept="image/*">
-                                <div class="form-text">
-                                    {% if settings.get('ctf_logo') %}
-                                        Current: <a href="{{ url_for('serve_logo', filename=settings.get('ctf_logo')) }}" target="_blank">View Logo</a>
-                                    {% else %}
-                                        No logo uploaded yet
-                                    {% endif %}
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="mb-3">
-                            <label for="ctf_description" class="form-label"><strong>CTF Description</strong></label>
-                            <textarea class="form-control" id="ctf_description" name="ctf_description" 
-                                      rows="3">{{ settings.get('ctf_description', 'Welcome to our CTF platform!') }}</textarea>
-                            <div class="form-text">A brief description displayed on the homepage</div>
-                        </div>
-                        
-                        <div class="row">
-                            <div class="col-md-6 mb-3">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="allow_registration" name="allow_registration" 
-                                           {% if settings.get('allow_registration', True) %}checked{% endif %}>
-                                    <label class="form-check-label" for="allow_registration">
-                                        <strong>Allow User Registration</strong>
-                                    </label>
-                                </div>
-                                <div class="form-text">
-                                    <i class="bi bi-info-circle"></i> When <strong>enabled</strong>: Users can create new accounts via the Register page.<br>
-                                    <i class="bi bi-info-circle"></i> When <strong>disabled</strong>: Only admins can create user accounts. Registration page will be hidden.
-                                </div>
-                            </div>
-                            
-                            <div class="col-md-6 mb-3">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="teams_enabled" name="teams_enabled" 
-                                           {% if settings.get('teams_enabled', True) %}checked{% endif %}>
-                                    <label class="form-check-label" for="teams_enabled">
-                                        <strong>Enable Teams</strong>
-                                    </label>
-                                </div>
-                                <div class="form-text">
-                                    <i class="bi bi-info-circle"></i> When <strong>enabled</strong>: Users can create and join teams. Team scoring is active.<br>
-                                    <i class="bi bi-info-circle"></i> When <strong>disabled</strong>: Solo competition mode. Teams menu is hidden. Individual scoring only.
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="row">
-                            <div class="col-md-6 mb-3">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="team_mode" name="team_mode" 
-                                           {% if settings.get('team_mode', True) %}checked{% endif %}>
-                                    <label class="form-check-label" for="team_mode">
-                                        <strong>Team Mode (Require Teams)</strong>
-                                    </label>
-                                </div>
-                                <div class="form-text">
-                                    <i class="bi bi-info-circle"></i> When <strong>enabled</strong>: Users must be in a team to solve challenges.<br>
-                                    <i class="bi bi-info-circle"></i> When <strong>disabled</strong>: Users can solve challenges individually, teams are optional.
-                                </div>
-                            </div>
-                            
-                            <div class="col-md-6 mb-3">
-                                <label for="first_blood_bonus" class="form-label"><strong>First Blood Bonus Points</strong></label>
-                                <input type="number" class="form-control" id="first_blood_bonus" name="first_blood_bonus" 
-                                       value="{{ settings.get('first_blood_bonus', 0) }}" min="0" max="500">
-                                <div class="form-text">
-                                    <i class="bi bi-info-circle"></i> Extra points awarded to the first solver of each challenge. Set to 0 to disable.
-                                </div>
-                            </div>
-                            
-                            <div class="col-md-6 mb-3">
-                                <label for="decay_function" class="form-label"><strong>Dynamic Scoring Decay Function</strong></label>
-                                <select class="form-select" id="decay_function" name="decay_function">
-                                    {% set current_decay = settings.get('decay_function', 'logarithmic') %}
-                                    <option value="logarithmic" {% if current_decay == 'logarithmic' %}selected{% endif %}>Logarithmic (Smooth, gradual decay)</option>
-                                    <option value="parabolic" {% if current_decay == 'parabolic' %}selected{% endif %}>Parabolic (Steeper early decay)</option>
-                                </select>
-                                <div class="form-text">
-                                    <i class="bi bi-info-circle"></i> <strong>Logarithmic:</strong> Points decrease smoothly and gradually as more teams solve.<br>
-                                    <i class="bi bi-info-circle"></i> <strong>Parabolic:</strong> Steeper decrease initially, then levels out.
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="row">
-                            <div class="col-md-6 mb-3">
-                                <div class="form-check mb-3">
-<input class="form-check-input" type="checkbox" id="scoreboard_frozen" name="scoreboard_frozen" {% if settings.get('scoreboard_snapshot') %}checked{% endif %}>
-<label class="form-check-label" for="scoreboard_frozen">Freeze public scoreboard</label>
-<div class="form-text">Save to capture current standings. Participants see this snapshot until unfrozen; admins retain live standings. Submissions remain open.</div>
-</div>
-<div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="scoreboard_visible" name="scoreboard_visible" 
-                                           {% if settings.get('scoreboard_visible', True) %}checked{% endif %}>
-                                    <label class="form-check-label" for="scoreboard_visible">
-                                        <strong>Show Scoreboard to Users</strong>
-                                    </label>
-                                </div>
-                                <div class="form-text">
-                                    <i class="bi bi-info-circle"></i> When <strong>enabled</strong>: Scoreboard is visible to signed-in users.<br>
-                                    <i class="bi bi-info-circle"></i> When <strong>disabled</strong>: Scoreboard is hidden. Only admins can view it.
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <button type="submit" class="btn btn-primary">
-                            <i class="bi bi-save"></i> Save Event Configuration
-                        </button>
-                    </form>
+                <div class="col-md-6">
+                    <label for="event_subtitle" class="form-label">Event subtitle</label>
+                    <input class="form-control" id="event_subtitle" name="event_subtitle" value="{{ settings.get('event_subtitle', '') }}">
+                </div>
+                <div class="col-12">
+                    <label for="ctf_description" class="form-label">Description</label>
+                    <textarea class="form-control" id="ctf_description" name="ctf_description" rows="3">{{ settings.get('ctf_description', 'Welcome to our CTF platform!') }}</textarea>
+                </div>
+                <div class="col-md-6">
+                    <label for="ctf_logo" class="form-label">CTF logo</label>
+                    <input type="file" class="form-control" id="ctf_logo" name="ctf_logo" accept="image/*">
+                    {% if settings.get('ctf_logo') %}
+                    <a href="{{ url_for('serve_logo', filename=settings.get('ctf_logo')) }}" target="_blank" rel="noopener">View current logo</a>
+                    {% endif %}
+                </div>
+                <div class="col-md-6">
+                    <label for="flag_format_prefix" class="form-label">Flag format prefix</label>
+                    <input class="form-control font-monospace" id="flag_format_prefix" name="flag_format_prefix"
+                           value="{{ flag_format_prefix }}" maxlength="32" aria-describedby="flag-format-help">
+                    <div id="flag-format-help" class="form-text">Used for new literal flags. Leave blank to use CYS.</div>
                 </div>
             </div>
-            
+            {% for key, label in [
+                ('allow_registration', 'Allow user registration'),
+                ('teams_enabled', 'Enable team registration and scoring'),
+                ('team_mode', 'Require teams to solve challenges')
+            ] %}
+            {{ setting_switch(key, label, settings.get(key, true)) }}
+            {% endfor %}
+            <button type="submit" class="btn btn-primary mt-3">Save event settings</button>
+        </form>
+    </div>
+</section>
+
+<section class="card mb-4" aria-labelledby="scoring-settings">
+    <div class="card-header"><h2 class="h5 mb-0" id="scoring-settings">Scoring</h2></div>
+    <div class="card-body">
+        <form method="post" action="{{ url_for('admin.update_event_config') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="row mb-3">
+                <div class="col-md-6">
+                    <label for="first_blood_bonus" class="form-label">First blood bonus points</label>
+                    <input type="number" class="form-control" id="first_blood_bonus" name="first_blood_bonus"
+                           value="{{ settings.get('first_blood_bonus', 0) }}" min="0" max="500">
+                    <div class="form-text">Awarded to the first solver of each challenge. Use 0 to disable.</div>
+                </div>
+                <div class="col-md-6">
+                    <label for="decay_function" class="form-label">Dynamic scoring decay</label>
+                    <select class="form-select" id="decay_function" name="decay_function">
+                        {% set decay = settings.get('decay_function', 'logarithmic') %}
+                        <option value="logarithmic" {{ 'selected' if decay == 'logarithmic' }}>Logarithmic (gradual)</option>
+                        <option value="parabolic" {{ 'selected' if decay == 'parabolic' }}>Parabolic (steeper at first)</option>
+                    </select>
+                </div>
+            </div>
+            {{ setting_switch('scoreboard_visible', 'Show scoreboard to users', settings.get('scoreboard_visible', true)) }}
+            {{ setting_switch('scoreboard_frozen', 'Freeze public scoreboard', settings.get('scoreboard_snapshot')) }}
+            <p class="form-text">Freezing captures the current standings for players. Admins continue to see live standings and submissions stay open.</p>
+            <button type="submit" class="btn btn-primary">Save scoring settings</button>
+        </form>
+    </div>
+</section>
+
+{% for p in ['_auth','_access','_appearance'] %}{% include 'admin/partials/' ~ p ~ '.html' ignore missing %}{% endfor %}
+
             <!-- Email Configuration -->
             <div class="card mb-4">
                 <div class="card-header bg-success text-white">
@@ -383,9 +307,7 @@
                 </dl>
             </div>
         </div>
-        </div>
-    </div>
-</div>
+
 
 {% endblock %}
 {% block extra_js %}

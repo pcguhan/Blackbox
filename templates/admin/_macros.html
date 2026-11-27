@@ -1,0 +1,81 @@
+{% macro page_heading(title, icon) %}
+<header class="admin-page-heading">
+    <div class="admin-page-title">
+        <i class="bi bi-{{ icon }}" aria-hidden="true"></i>
+        <h1>{{ title }}</h1>
+    </div>
+    {% if caller is defined %}<div class="admin-heading-actions">{{ caller() }}</div>{% endif %}
+</header>
+{% endmacro %}
+
+{% macro role_badge(is_admin, user_id) %}
+<span class="badge admin-role-badge {{ 'is-admin' if is_admin else 'is-player' }}" id="admin-badge-{{ user_id }}">
+    <i class="bi {{ 'bi-shield-fill' if is_admin else 'bi-person-fill' }}" aria-hidden="true"></i>
+    {{ 'Admin' if is_admin else 'Player' }}
+</span>
+{% endmacro %}
+
+{% macro entity_filter(name, label, records, display='name') %}
+<div>
+    <label for="filter-{{ name }}" class="form-label">{{ label }}</label>
+    <select id="filter-{{ name }}" name="{{ name }}" class="form-select">
+        <option value="">Any</option>
+        {% for record in records %}
+        <option value="{{ record.id }}"{% if request.args.get(name)|int == record.id %} selected{% endif %}>
+            {{ record|attr(display) }}
+        </option>
+        {% endfor %}
+    </select>
+</div>
+{% endmacro %}
+
+{% macro setting_switch(name, label, enabled) %}
+<input type="hidden" name="{{ name }}" value="0">
+<div class="form-check form-switch">
+    <input class="form-check-input" type="checkbox" id="{{ name }}" name="{{ name }}" value="1" {{ 'checked' if enabled }}>
+    <label class="form-check-label" for="{{ name }}">{{ label }}</label>
+</div>
+{% endmacro %}
+
+{% macro date_filters() %}
+{% for name, label in [('start_date', 'From date'), ('end_date', 'Through date')] %}
+<div>
+    <label for="filter-{{ name }}" class="form-label">{{ label }}</label>
+    <input class="form-control" type="date" id="filter-{{ name }}" name="{{ name }}" value="{{ request.args.get(name, '') }}">
+</div>
+{% endfor %}
+{% endmacro %}
+
+{% macro filter_actions(endpoint, export_endpoint, filters) %}
+<div class="admin-filter-actions">
+    <button type="submit" class="btn btn-primary">Filter</button>
+    <a href="{{ url_for(endpoint) }}" class="btn btn-outline-secondary">Reset</a>
+    <a href="{{ url_for(export_endpoint, **filters) }}" class="btn btn-outline-primary">
+        <i class="bi bi-download" aria-hidden="true"></i> Export CSV
+    </a>
+</div>
+{% endmacro %}
+
+{% macro pagination(results, endpoint, filters, label) %}
+{% if results.pages > 1 %}
+<nav class="mt-3" aria-label="{{ label }}">
+    <ul class="pagination flex-wrap mb-0">
+        {% if results.has_prev %}
+        <li class="page-item"><a class="page-link" href="{{ url_for(endpoint, page=results.prev_num, **filters) }}">Previous</a></li>
+        {% endif %}
+        {% for page in results.iter_pages() %}
+            {% if page == results.page %}
+            <li class="page-item active"><span class="page-link" aria-current="page">{{ page }}</span></li>
+            {% elif page %}
+            <li class="page-item"><a class="page-link" href="{{ url_for(endpoint, page=page, **filters) }}">{{ page }}</a></li>
+            {% else %}
+            <li class="page-item disabled"><span class="page-link">…</span></li>
+            {% endif %}
+        {% endfor %}
+        {% if results.has_next %}
+        <li class="page-item"><a class="page-link" href="{{ url_for(endpoint, page=results.next_num, **filters) }}">Next</a></li>
+        {% endif %}
+    </ul>
+</nav>
+{% endif %}
+{% endmacro %}
