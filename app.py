@@ -76,6 +76,7 @@ def create_app(config_name=None):
     from routes.teams import teams_bp
     from routes.scoreboard import scoreboard_bp
     from routes.admin import admin_bp
+    from routes.access_admin import access_admin_bp
     from routes.notifications import notifications_bp
     from routes.setup import setup_bp
     from routes.hints import hints_bp
@@ -87,9 +88,37 @@ def create_app(config_name=None):
     app.register_blueprint(teams_bp)
     app.register_blueprint(scoreboard_bp)
     app.register_blueprint(admin_bp)
+    app.register_blueprint(access_admin_bp)
     app.register_blueprint(notifications_bp)
     app.register_blueprint(hints_bp)
     app.register_blueprint(container_bp)
+
+    @app.before_request
+    def recheck_session_access():
+        from flask import flash, g, jsonify, redirect, request, url_for
+        from flask_login import current_user, logout_user
+        from services.exclusive_access import BLOCKED_MESSAGE, DEACTIVATED_MESSAGE, enforce_for_user
+
+        if current_user.is_anonymous or enforce_for_user(current_user):
+            return None
+
+        message = BLOCKED_MESSAGE if current_user.is_active else DEACTIVATED_MESSAGE
+        g.access_revoked = True
+        logout_user()
+        if '/api/' in request.path or request.accept_mimetypes.best == 'application/json':
+            return jsonify(success=False, message=message), 403
+        flash(message, 'error')
+        return redirect(url_for('auth.login'))
+
+    @app.after_request
+    def prevent_caching_signed_in_responses(response):
+        from flask import g
+        from flask_login import current_user
+
+        if response.mimetype == 'text/html' or response.is_json:
+            if current_user.is_authenticated or g.get('access_revoked'):
+                response.headers['Cache-Control'] = 'no-store'
+        return response
     
     # Setup check middleware
     @app.before_request

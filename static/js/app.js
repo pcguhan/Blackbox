@@ -35,3 +35,12 @@ document.addEventListener('DOMContentLoaded', () => {
         new bootstrap.Popover(element, { container: 'body' });
     });
 });
+
+if (document.getElementById('userDropdown')) {
+    window.addEventListener('pagehide', event => {
+        if (event.persisted) document.documentElement.hidden = true;
+    });
+    window.addEventListener('pageshow', event => {
+        if (event.persisted) window.location.reload();
+    });
+}

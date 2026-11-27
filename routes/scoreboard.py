@@ -86,6 +86,7 @@ def get_top_teams(limit):
 
 
 @scoreboard_bp.route('/api/stats')
+@login_required
 def get_platform_stats():
     """Get overall platform statistics"""
     stats = cache_service.get_stats()

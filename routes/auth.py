@@ -7,6 +7,7 @@ from utils.audit import log_audit_event
 import re
 from utils.email import send_email, generate_confirmation_token, verify_token
 from flask import current_app
+from services.exclusive_access import BLOCKED_MESSAGE, DEACTIVATED_MESSAGE, enforce_for_user, is_email_allowed
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -28,8 +29,8 @@ def login():
         user = User.query.filter_by(username=username).first()
         
         if user and user.check_password(password):
-            if not user.is_active:
-                flash('Your account has been deactivated', 'error')
+            if not enforce_for_user(user):
+                flash(BLOCKED_MESSAGE if user.is_active else DEACTIVATED_MESSAGE, 'error')
                 return render_template('login.html')
                 
             from models.settings import Settings
@@ -96,6 +97,9 @@ def register():
         # Validate email format
         if not re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', email):
             flash('Please enter a valid email address', 'error')
+            return render_template('register.html')
+        if not is_email_allowed(email):
+            flash(BLOCKED_MESSAGE, 'error')
             return render_template('register.html')
         
         if password != confirm_password:
