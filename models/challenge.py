@@ -108,6 +108,20 @@ class Challenge(db.Model):
         """Get total number of submissions"""
         return self.submissions.count()
     
+    def has_generated_flag(self, flags=None):
+        """True when a Docker challenge uses per-instance flags (its stored flag is a generated seed)."""
+        import re
+        from models.branching import ChallengeFlag
+
+        if not self.docker_enabled:
+            return False
+        if flags is None:
+            flags = ChallengeFlag.query.filter_by(challenge_id=self.id).all()
+        return (
+            re.fullmatch(r'[^{]*\{[0-9a-f]{48}\}', self.flag or '') is not None
+            and not any(flag.flag_value == self.flag for flag in flags)
+        )
+
     def check_flag(self, submitted_flag, team_id=None, user_id=None):
         """Check if submitted flag is correct (checks all flags for this challenge)
         
@@ -127,9 +141,11 @@ class Challenge(db.Model):
             instance = ContainerInstance.find_flag_instance(submitted_flag, self, user_id, team_id)
             if instance:
                 return _DynamicFlagMatch(submitted_flag, self.flag_case_sensitive, instance.session_id)
-            return None
 
         flags = ChallengeFlag.query.filter_by(challenge_id=self.id).all()
+        if self.has_generated_flag(flags):
+            # Per-instance Docker flags only: never accept the stored seed or a static guess.
+            return None
         for flag in flags:
             if flag.check_flag(submitted_flag, team_id=team_id, user_id=user_id):
                 return flag

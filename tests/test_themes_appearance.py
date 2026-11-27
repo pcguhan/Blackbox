@@ -119,9 +119,9 @@ class ThemesAppearanceTests(unittest.TestCase):
     def test_appearance_is_admin_only(self):
         player = self.login('player')
         payload = {'site_theme': 'neon', 'site_font': 'georgia'}
-        self.assertEqual(self.visitor.post('/admin/settings/appearance', data=payload).status_code, 302)
+        self.assertEqual(self.visitor.post('/admin/settings/appearance', data=payload).status_code, 403)
         payload['csrf_token'] = self.csrf_token(player, '/profile')
-        self.assertEqual(player.post('/admin/settings/appearance', data=payload).status_code, 302)
+        self.assertEqual(player.post('/admin/settings/appearance', data=payload).status_code, 403)
         page = self.assert_theme(player, '/profile', 'default')
         self.assertNotIn('adminThemeSelect', page)
         self.assertNotIn('adminFontSelect', page)

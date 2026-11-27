@@ -179,7 +179,7 @@ def get_status():
 def list_my_containers():
     """List all containers for current user"""
     try:
-        containers = container_orchestrator._active_instances().filter_by(user_id=current_user.id).filter(
+        containers = container_orchestrator._active_instances().filter_by(user_id=current_user.id, team_id=current_user.team_id).filter(
             ContainerInstance.challenge_id.in_(visible_challenges_query(current_user).with_entities(Challenge.id))
         ).all()
         result = [

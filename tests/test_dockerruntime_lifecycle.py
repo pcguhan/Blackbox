@@ -182,6 +182,8 @@ class DockerRuntimeTests(unittest.TestCase):
         self.set_settings(auto_cleanup_on_solve=False)
         owner = self.user_client()
         with app.app_context():
+            # A generated seed marks the challenge as per-instance only.
+            db.session.get(Challenge, 1).flag = 'CYS{' + 'a' * 48 + '}'
             db.session.add_all([
                 ChallengeFlag(challenge_id=1, flag_value='CYS{static}'),
                 ChallengeFlag(challenge_id=1, flag_value='CYS{branch}', unlocks_challenge_id=self.second_id),

@@ -770,7 +770,7 @@ def submit_flag(challenge_id):
 
             stop_result = container_orchestrator.stop_container(
                 challenge_id, current_user.id, force=True, on_solve=True,
-                session_id=matched_flag.container_session_id,
+                session_id=getattr(matched_flag, 'container_session_id', None),
             )
             if not stop_result['success']:
                 current_app.logger.warning('Container cleanup after solve failed: %s', stop_result['error'])

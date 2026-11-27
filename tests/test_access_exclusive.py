@@ -119,7 +119,7 @@ class ExclusiveAccessTests(unittest.TestCase):
         token = self.token(self.player, '/profile')
         self.assertEqual(self.player.get('/admin/exclusive-access').status_code, 302)
         denied = self.player.post('/admin/exclusive-access', data={'action': 'enable', 'csrf_token': token})
-        self.assertEqual(denied.status_code, 302)
+        self.assertEqual(denied.status_code, 403)
         self.assertEqual(self.login(self.admin, 'preview-admin').status_code, 302)
         denied = self.admin.post('/admin/exclusive-access', data={'action': 'enable'})
         self.assertEqual(denied.status_code, 403)
