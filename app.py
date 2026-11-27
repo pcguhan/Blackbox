@@ -2,14 +2,18 @@ import gevent.monkey
 gevent.monkey.patch_all()
 
 from flask import Flask, render_template, send_from_directory, send_file, abort
-from flask_login import LoginManager
+from flask_login import LoginManager, login_required
 from flask.json.provider import DefaultJSONProvider
 from config import config
 from models import db
 from models.user import User
+from scripts.schema_backups import ensure_profile_schema
 from services.cache import cache_service
 from services.websocket import WebSocketService, socketio
 from services.file_storage import file_storage
+from services.backup_paths import init_backup_paths
+from routes.profile_settings import profile_settings_bp
+from routes.admin_versions import admin_versions_bp
 from security_utils import init_security
 import os
 from decimal import Decimal
@@ -32,6 +36,7 @@ def create_app(config_name=None):
     
     app = Flask(__name__, static_folder=static_folder, static_url_path='/static')
     app.config.from_object(config[config_name])
+    init_backup_paths(app)
     
     # Set custom JSON provider
     app.json = DecimalJSONProvider(app)
@@ -90,6 +95,8 @@ def create_app(config_name=None):
     app.register_blueprint(notifications_bp)
     app.register_blueprint(hints_bp)
     app.register_blueprint(container_bp)
+    app.register_blueprint(profile_settings_bp)
+    app.register_blueprint(admin_versions_bp)
     
     # Setup check middleware
     @app.before_request
@@ -136,45 +143,43 @@ def create_app(config_name=None):
         """Serve uploaded logo files from /var/uploads/logos"""
         logos_folder = app.config['LOGO_UPLOAD_FOLDER']
         try:
-            return send_from_directory(logos_folder, filename)
+            response = send_from_directory(logos_folder, filename)
+            response.headers['Content-Security-Policy'] = "default-src 'none'; img-src 'self'; sandbox"
+            return response
         except FileNotFoundError:
             abort(404)
     
     @app.route('/files/<path:filename>')
+    @login_required
     def serve_file(filename):
         """Serve uploaded files with original filename"""
         from models.file import ChallengeFile
-        import os
-        from urllib.parse import quote
-        
-        upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
-        
+        from pathlib import Path
+
+        upload_folder = Path(app.config['UPLOAD_FOLDER']).resolve()
         normalized_path = filename.replace('/', os.sep)
-        file_record = ChallengeFile.query.filter_by(relative_path=normalized_path).first()
-        if not file_record: 
-            file_record = ChallengeFile.query.filter_by(relative_path=filename).first()
-        
-        file_path = os.path.realpath(os.path.join(upload_folder, normalized_path))
-        if not file_path.startswith(os.path.realpath(upload_folder) + os.sep):
-            abort(403)
-        
-        if not os.path.exists(file_path):
-            app.logger.warning(f"File not found: {file_path}")
+        file_path = (upload_folder / normalized_path).resolve()
+        legacy_folder = upload_folder / 'backups'
+        if (not file_path.is_relative_to(upload_folder)
+                or (upload_folder / normalized_path).is_relative_to(legacy_folder)
+                or file_path.is_relative_to(legacy_folder.resolve())):
             abort(404)
-        
-        if file_record and file_record.original_filename:
-            download_filename = file_record.original_filename
-            app.logger.info(f"Found DB record: {download_filename}")
-        else:
-            download_filename = os.path.basename(file_path)
-            app.logger.warning(f"No DB record, using: {download_filename}")
-        
-        return send_file(
+
+        file_record = ChallengeFile.query.filter_by(relative_path=normalized_path).first()
+        if file_record is None and normalized_path != filename:
+            file_record = ChallengeFile.query.filter_by(relative_path=filename).first()
+        if file_record is None or not file_path.is_file():
+            abort(404)
+
+        response = send_file(
             file_path,
             as_attachment=True,
-            download_name=download_filename,
-            mimetype=file_record.mime_type if file_record and file_record.mime_type else 'application/octet-stream'
+            download_name=file_record.original_filename or file_path.name,
+            mimetype=file_record.mime_type or 'application/octet-stream'
         )
+        response.cache_control.private = True
+        response.cache_control.no_store = True
+        return response
     
     @app.route('/favicon.ico')
     def favicon():
@@ -309,6 +314,7 @@ if not app.testing:
         try:
             from scripts.db_schema import ensure_docker_schema
             ensure_docker_schema()
+            ensure_profile_schema()
             app.logger.info("Ensured docker DB schema and defaults")
         except Exception as e:
             app.logger.warning(f"Could not ensure docker DB schema on startup: {e}")

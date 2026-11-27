@@ -14,6 +14,8 @@ class User(UserMixin, db.Model):
     
     # User info
     full_name = db.Column(db.String(120))
+    nickname = db.Column(db.String(80))
+    avatar_filename = db.Column(db.String(64))
     is_admin = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
     is_verified = db.Column(db.Boolean, default=False)

@@ -39,7 +39,7 @@ class SecurityHeaders:
             "connect-src 'self' ws: wss: https://cdn.jsdelivr.net https://cdn.socket.io; "
             "frame-ancestors 'none';"
         )
-        response.headers['Content-Security-Policy'] = csp
+        response.headers.setdefault('Content-Security-Policy', csp)
         
         # HSTS
         if not current_app.debug:

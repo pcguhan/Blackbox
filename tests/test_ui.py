@@ -131,6 +131,8 @@ class UIFlows(unittest.TestCase):
     def test_admin_theme_and_logo_can_be_saved_locally(self):
         from io import BytesIO
         from tempfile import TemporaryDirectory
+        from PIL import Image
+
         self.login(admin=True)
         response = self.client.post('/admin/settings/background-theme', data={
             'site_theme': 'forest',
@@ -152,15 +154,21 @@ class UIFlows(unittest.TestCase):
             old_folder = app.config['LOGO_UPLOAD_FOLDER']
             app.config['LOGO_UPLOAD_FOLDER'] = folder
             try:
+                photo = BytesIO()
+                Image.new('RGB', (16, 16), 'blue').save(photo, 'PNG')
+                photo.seek(0)
                 response = self.client.post('/admin/settings/event-config', data={
                     'ctf_name': 'Local event', 'scoreboard_visible': 'on',
-                    'ctf_logo': (BytesIO(b'local-logo-content'), 'logo.png'),
+                    'ctf_logo': (photo, 'logo.png'),
                 }, content_type='multipart/form-data', follow_redirects=True)
                 self.assertEqual(response.status_code, 200)
                 with app.app_context():
                     filename = Settings.get('ctf_logo')
                 self.assertTrue(filename)
-                self.assertEqual(self.client.get('/uploads/' + filename).data, b'local-logo-content')
+                with self.client.get('/uploads/' + filename) as stored:
+                    self.assertEqual(stored.mimetype, 'image/png')
+                    with Image.open(BytesIO(stored.data)) as logo:
+                        self.assertEqual(logo.getpixel((0, 0)), (0, 0, 255))
             finally:
                 app.config['LOGO_UPLOAD_FOLDER'] = old_folder
 

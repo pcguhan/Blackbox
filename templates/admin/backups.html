@@ -87,8 +87,7 @@
                 
                 <div class="alert alert-info mt-3 mb-0">
                     <i class="bi bi-info-circle"></i>
-                    <strong>Note:</strong> Backups contain database snapshots (SQL dumps). 
-                    You can download, upload, and restore backups. Uploads must be .sql.gz format.
+                    Backups are stored privately. Administrators can download, upload, and restore .sql.gz database dumps here.
                 </div>
             </div>
         </div>
@@ -172,7 +171,7 @@ function displayBackups(backups) {
     const list = document.getElementById('backups-list');
     const noBackups = document.getElementById('no-backups');
     
-    list.innerHTML = '';
+    list.replaceChildren();
     
     if (backups.length === 0) {
         noBackups.style.display = 'block';
@@ -187,37 +186,39 @@ function displayBackups(backups) {
         
         const components = backup.components || {};
         const sizes = backup.sizes || {};
-        const totalSize = (parseInt(sizes.database_mb || 0) + 
-                          parseInt(sizes.uploads_mb || 0) + 
-                          parseInt(sizes.redis_mb || 0));
+        const totalSize = Number(sizes.database_mb ?? backup.size_mb ?? 0) +
+                          Number(sizes.uploads_mb || 0) + Number(sizes.redis_mb || 0);
         
         let componentBadges = '';
         if (components.database) componentBadges += '<span class="badge bg-primary me-1">DB</span>';
         if (components.uploads) componentBadges += '<span class="badge bg-success me-1">Files</span>';
         if (components.redis) componentBadges += '<span class="badge bg-info me-1">Cache</span>';
         
-        const timestamp = backup.timestamp ? new Date(backup.timestamp).toLocaleString() : 'Unknown';
-        
         row.innerHTML = `
-            <td><code>${backup.backup_name}</code></td>
-            <td><small>${timestamp}</small></td>
+            <td><code></code></td>
+            <td><small></small></td>
             <td>${componentBadges || '-'}</td>
             <td>${totalSize > 0 ? totalSize : '-'}</td>
             <td>
-                <button class="btn btn-sm btn-success" onclick="restoreBackup('${backup.backup_name}')" 
+                <button type="button" class="btn btn-sm btn-success" data-restore
                         title="Restore this backup">
                     <i class="bi bi-arrow-counterclockwise"></i> Restore
                 </button>
-                <button class="btn btn-sm btn-primary" onclick="downloadBackup('${backup.backup_name}')" 
+                <button type="button" class="btn btn-sm btn-primary" data-download
                         title="Download backup">
                     <i class="bi bi-download"></i>
                 </button>
-                <button class="btn btn-sm btn-danger" onclick="deleteBackup('${backup.backup_name}')" 
+                <button type="button" class="btn btn-sm btn-danger" data-delete
                         title="Delete backup">
                     <i class="bi bi-trash"></i>
                 </button>
             </td>
         `;
+        row.querySelector('code').textContent = backup.backup_name;
+        row.querySelector('small').textContent = backup.timestamp ? new Date(backup.timestamp).toLocaleString() : 'Unknown';
+        row.querySelector('[data-restore]').addEventListener('click', event => restoreBackup(backup.backup_name, event.currentTarget));
+        row.querySelector('[data-download]').addEventListener('click', () => downloadBackup(backup.backup_name));
+        row.querySelector('[data-delete]').addEventListener('click', () => deleteBackup(backup.backup_name));
         
         list.appendChild(row);
     });
@@ -273,7 +274,7 @@ function createBackup() {
     });
 }
 
-function restoreBackup(backupName) {
+function restoreBackup(backupName, btn) {
     if (!confirm(`⚠️ WARNING: This will OVERWRITE ALL CURRENT DATA!\n\nRestore from backup: ${backupName}?\n\nType "YES" to continue.`)) {
         return;
     }
@@ -284,7 +285,6 @@ function restoreBackup(backupName) {
         return;
     }
     
-    const btn = event.target;
     const originalText = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Restoring...';
@@ -337,7 +337,7 @@ function deleteBackup(backupName) {
 }
 
 function downloadBackup(backupName) {
-    window.location.href = `/admin/backups/api/download/${backupName}`;
+    window.location.href = `/admin/backups/api/download/${encodeURIComponent(backupName)}`;
 }
 
 function showError(message) {
