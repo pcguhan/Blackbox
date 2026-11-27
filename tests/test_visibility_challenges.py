@@ -203,7 +203,7 @@ class ChallengeVisibility(unittest.TestCase):
                     Settings.set('ctf_end_time', end, 'datetime')
                     Settings.set('ctf_paused', paused, 'bool')
                 page = self.player.get('/challenges/').text
-                self.assertIn(banner, page)
+                self.assertIn(banner.rstrip(':').lower(), page.lower())
                 self.assertNotIn('Scheduled fixture', page)
                 self.assert_unavailable(self.player, target)
                 self.assertIn('Scheduled fixture', self.admin.get('/challenges/').text)

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ ctf_name }} - Capture the flag{% endblock %}
 {% block content %}
+{% set google_only = settings.get('auth_google_only', default=False, type='bool') %}
 <section class="home-hero" aria-labelledby="home-title">
     <div class="home-introduction">
         <p class="eyebrow">{{ ctf_name }}</p>
@@ -9,13 +10,13 @@
         <div class="home-actions">
             {% if current_user.is_authenticated %}
             <a href="{{ url_for('challenges.list_challenges') }}" class="btn btn-primary">Open challenges <i class="bi bi-arrow-up-right" aria-hidden="true"></i></a>
-            {% elif registration_enabled %}
+            {% elif registration_enabled and not google_only %}
             <a href="{{ url_for('auth.register') }}" class="btn btn-primary">Create an account <i class="bi bi-arrow-up-right" aria-hidden="true"></i></a>
             <a href="{{ url_for('auth.login') }}" class="btn btn-outline-primary">Sign in</a>
             {% else %}
             <a href="{{ url_for('auth.login') }}" class="btn btn-primary">Sign in to compete <i class="bi bi-arrow-up-right" aria-hidden="true"></i></a>
             {% endif %}
-            <a href="{{ url_for('about') }}#how-to-play" class="home-guide-link">How to play <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
+            <a href="{{ url_for('guide.view_guide') }}" class="home-guide-link">How to play <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
         </div>
     </div>
     <aside class="competition-desk" aria-labelledby="competition-desk-title">
@@ -30,26 +31,51 @@
         <a class="desk-footer-link" href="{{ url_for('auth.profile') }}">View your profile <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
         {% else %}
         <ol class="desk-steps">
-            <li><span>01</span><div><strong>Get access</strong><p>{{ 'Register an account or sign in.' if registration_enabled else 'Sign in with your event account.' }}</p></div></li>
-            <li><span>02</span><div><strong>{{ 'Find your team' if teams_enabled else 'Choose a challenge' }}</strong><p>{{ 'Create a team or join with an invite code.' if teams_enabled else 'Start with a category you know.' }}</p></div></li>
-            <li><span>03</span><div><strong>Submit your first flag</strong><p>Successful submissions count towards your score.</p></div></li>
+            <li><div><strong>Get access</strong><p>{% if google_only %}Sign in with your VIT Google account.{% elif registration_enabled %}Register an account or sign in.{% else %}Sign in with your event account.{% endif %}</p></div></li>
+            <li><div><strong>{{ 'Find your team' if teams_enabled else 'Choose a challenge' }}</strong><p>{{ 'Create a team or join with an invite code.' if teams_enabled else 'Start with a category you know.' }}</p></div></li>
+            <li><div><strong>Submit your first flag</strong><p>Successful submissions count towards your score.</p></div></li>
         </ol>
         {% endif %}
     </aside>
-<div class="home-workspace" aria-label="Explore the event">
+</section>
+<section class="home-workspace" aria-labelledby="home-features-title">
+    <h2 id="home-features-title" class="mb-3">Explore the event</h2>
     <div class="action-grid">
-        <article class="action-panel"><div class="action-index"><span>01 / Challenges</span><i class="bi bi-terminal" aria-hidden="true"></i></div><h3>Investigate.<br>Test. Solve.</h3><p>Read the brief, examine the files, and find the flag. Each challenge has its own tools and approach.</p><a class="btn btn-outline-primary" href="{{ url_for('challenges.list_challenges') }}">{{ 'Browse challenges' if current_user.is_authenticated else 'Sign in for challenges' }} <i class="bi bi-arrow-right" aria-hidden="true"></i></a></article>
+        <article class="action-panel"><i class="bi bi-puzzle feature-icon" aria-hidden="true"></i><h3>Solve challenges</h3><p>Follow challenge briefs across categories such as forensics, web, and cryptography.</p><a class="btn btn-outline-primary" href="{{ url_for('challenges.list_challenges') }}">{{ 'Browse challenges' if current_user.is_authenticated else 'Sign in for challenges' }} <i class="bi bi-arrow-right" aria-hidden="true"></i></a></article>
         {% if teams_enabled %}
-        <article class="action-panel"><div class="action-index"><span>02 / Team workspace</span><i class="bi bi-people" aria-hidden="true"></i></div><h3>Different skills.<br>One team.</h3><p>Bring your teammates together. Create a team or use an invite code to join an existing one.</p><a class="btn btn-outline-primary" href="{{ url_for('teams.view_team', team_id=current_user.team_id) if current_user.is_authenticated and current_user.team_id else url_for('teams.list_teams') }}">{{ 'Open your team' if current_user.is_authenticated and current_user.team_id else 'Find your team' }} <i class="bi bi-arrow-right" aria-hidden="true"></i></a></article>
+        <article class="action-panel"><i class="bi bi-people feature-icon" aria-hidden="true"></i><h3>Play as a team</h3><p>Bring your teammates together. Create a team or use an invite code to join an existing one.</p><a class="btn btn-outline-primary" href="{{ url_for('teams.view_team', team_id=current_user.team_id) if current_user.is_authenticated and current_user.team_id else url_for('teams.list_teams') }}">{{ 'Open your team' if current_user.is_authenticated and current_user.team_id else 'Find your team' }} <i class="bi bi-arrow-right" aria-hidden="true"></i></a></article>
         {% else %}
-        <article class="action-panel"><div class="action-index"><span>02 / Personal progress</span><i class="bi bi-person" aria-hidden="true"></i></div><h3>Your solves.<br>Your progress.</h3><p>Keep track of the challenges you have solved and the points attached to each successful submission.</p><a class="btn btn-outline-primary" href="{{ url_for('auth.profile') }}">View your profile <i class="bi bi-arrow-right" aria-hidden="true"></i></a></article>
+        <article class="action-panel"><i class="bi bi-person feature-icon" aria-hidden="true"></i><h3>Track your progress</h3><p>Review the challenges you solved and the points you earned.</p><a class="btn btn-outline-primary" href="{{ url_for('auth.profile') }}">View your profile <i class="bi bi-arrow-right" aria-hidden="true"></i></a></article>
         {% endif %}
         {% if current_user.is_authenticated and (scoreboard_visible or current_user.is_admin) %}
-        <article class="action-panel"><div class="action-index"><span>03 / Standings</span><i class="bi bi-list-ol" aria-hidden="true"></i></div><h3>Follow the<br>competition.</h3><p>See the current rankings, points, and solves. The leaderboard updates as the competition progresses.</p><a class="btn btn-outline-primary" href="{{ url_for('scoreboard.view_scoreboard') }}">View leaderboard <i class="bi bi-arrow-right" aria-hidden="true"></i></a></article>
+        <article class="action-panel"><i class="bi bi-trophy feature-icon" aria-hidden="true"></i><h3>Follow the standings</h3><p>See current rankings, points, and solves as the event progresses.</p><a class="btn btn-outline-primary" href="{{ url_for('scoreboard.view_scoreboard') }}">View leaderboard <i class="bi bi-arrow-right" aria-hidden="true"></i></a></article>
         {% else %}
-        <article class="action-panel"><div class="action-index"><span>03 / Event guide</span><i class="bi bi-book" aria-hidden="true"></i></div><h3>Know the format.<br>Be ready.</h3><p>Read how submissions, scoring, and event rules work before attempting your next challenge.</p><a class="btn btn-outline-primary" href="{{ url_for('about') }}">Open the guide <i class="bi bi-arrow-right" aria-hidden="true"></i></a></article>
+        <article class="action-panel"><i class="bi bi-book feature-icon" aria-hidden="true"></i><h3>Read the event guide</h3><p>Learn how to sign in, join a team, and submit your first flag.</p><a class="btn btn-outline-primary" href="{{ url_for('guide.view_guide') }}">Open the guide <i class="bi bi-arrow-right" aria-hidden="true"></i></a></article>
         {% endif %}
+        <article class="action-panel">
+            <i class="bi bi-box feature-icon" aria-hidden="true"></i>
+            <h3>Start a live instance</h3>
+            <p class="mb-0">Launch a timed container on challenges that provide one.</p>
+        </article>
+        <article class="action-panel">
+            <i class="bi bi-lightbulb feature-icon" aria-hidden="true"></i>
+            <h3>Unlock hints</h3>
+            <p class="mb-0">See the cost before unlocking a hint, then use it to move forward.</p>
+        </article>
+        <article class="action-panel">
+            <i class="bi bi-lightning-charge feature-icon" aria-hidden="true"></i>
+            <h3>Earn first blood</h3>
+            <p class="mb-0">Get first-blood credit when you are first to solve a challenge.</p>
+        </article>
     </div>
-</div>
+</section>
+<section class="home-credits" aria-labelledby="home-credits-title">
+    <h2 id="home-credits-title">Credits</h2>
+    {# TODO club credits #}
+    <ul class="home-credits-list" role="list">
+        <li>CYSCOM</li>
+        <li><span class="credit-separator" aria-hidden="true">•</span> Event organisers</li>
+        <li><span class="credit-separator" aria-hidden="true">•</span> Challenge authors</li>
+    </ul>
 </section>
 {% endblock %}

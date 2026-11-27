@@ -15,6 +15,7 @@
     <link href="{{ url_for('static', filename='css/design.css') }}" rel="stylesheet">
     <link href="{{ url_for('static', filename='css/themes-extra.css') }}" rel="stylesheet">
     <link href="{{ url_for('static', filename='css/account-menu.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/pages.css') }}" rel="stylesheet">
 
     <script src="{{ url_for('static', filename='js/theme.js') }}" defer></script>
     <!-- Custom Background Theme -->
@@ -73,6 +74,7 @@
                     </li>
                     {% endif %}
                     {% endif %}
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('guide.view_guide') }}">Guide</a></li>
                 </ul>
                 <ul class="navbar-nav site-nav-actions">
                     {% if current_user.is_authenticated %}

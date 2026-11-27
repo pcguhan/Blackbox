@@ -6,33 +6,24 @@
 <div class="container">
     <div class="row justify-content-center">
         <div class="col-lg-8">
-            <div class="card shadow-lg">
-                <div class="card-body text-center p-5">
+            <div class="card event-state">
+                <div class="card-body text-center">
                     {% if status == 'paused' %}
                     <div class="mb-4">
-                        <i class="bi bi-pause-circle" style="font-size: 4rem; color: #ffc107;"></i>
+                        <i class="bi bi-pause-circle event-state-icon" aria-hidden="true"></i>
                     </div>
                     
-                    <h2 class="mb-3 text-warning">CTF is Paused</h2>
+                    <h1 class="mb-3">CTF is Paused</h1>
                     <p class="text-muted mb-4">The CTF is currently paused by administrators. Challenges are not available during this time.</p>
-                    
-                    <div class="alert alert-warning">
-                        <i class="bi bi-info-circle"></i> 
-                        <strong>Status:</strong> Paused by Administrators
-                    </div>
                     
                     {% else %}
                     <div class="mb-4">
-                        <i class="bi bi-stop-circle" style="font-size: 4rem; color: #dc3545;"></i>
+                        <i class="bi bi-stop-circle event-state-icon" aria-hidden="true"></i>
                     </div>
                     
-                    <h2 class="mb-3 text-danger">CTF has Ended</h2>
+                    <h1 class="mb-3">CTF has Ended</h1>
                     <p class="text-muted mb-4">The CTF has concluded. Thank you for participating!</p>
                     
-                    <div class="alert alert-danger">
-                        <i class="bi bi-info-circle"></i> 
-                        <strong>Status:</strong> Event Ended
-                    </div>
                     {% endif %}
                     
                     <hr>
@@ -61,16 +52,16 @@
 </div>
 
 <script>
-// Check every 30 seconds if CTF has resumed
-setInterval(() => {
-    fetchWithCSRF("{{ url_for('challenges.list_challenges') }}")
-        .then(response => {
-            // If we get redirected to challenges page (not this status page), reload
-            if (response.ok && !response.url.includes('challenges')) {
-                window.location.href = "{{ url_for('challenges.list_challenges') }}";
-            }
-        })
-        .catch(() => {});
+setInterval(async () => {
+    try {
+        const response = await fetchWithCSRF({{ url_for('notifications.competition_status')|tojson }});
+        if (response.redirected) {
+            window.location.assign(response.url);
+        } else if (response.ok) {
+            const event = await response.json();
+            if (event.status !== {{ status|tojson }}) window.location.reload();
+        }
+    } catch (_) { /* Keep the current status visible while disconnected. */ }
 }, 30000);
 </script>
 {% endblock %}

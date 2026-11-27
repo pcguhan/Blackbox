@@ -102,6 +102,7 @@ def create_app(config_name=None):
     from routes.container import container_bp
     from routes.appearance_admin import appearance_admin_bp
     from routes.docker_upload import docker_upload_bp
+    from routes.guide import guide_bp
     
     app.register_blueprint(setup_bp)
     app.register_blueprint(auth_bp)
@@ -146,6 +147,7 @@ def create_app(config_name=None):
     app.register_blueprint(docker_upload_bp)
     app.register_blueprint(profile_settings_bp)
     app.register_blueprint(admin_versions_bp)
+    app.register_blueprint(guide_bp)
     
     # Setup check middleware
     @app.before_request
