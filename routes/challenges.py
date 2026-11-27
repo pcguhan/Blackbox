@@ -762,11 +762,13 @@ def _submit_participant_flag(challenge_id, submitted_flag, team_id):
                 except Exception:
                     current_app.logger.exception("Error auto-stopping container for challenge %s", challenge_id)
 
+            # Hidden or branch-unlocked challenges are announced without their name or category.
+            public_challenge = challenge.is_visible and not challenge.is_hidden
             WebSocketService.emit_new_solve({
                 'user': current_user.username,
                 'team': team.name if team else None,
-                'challenge': challenge.name,
-                'category': challenge.category,
+                'challenge': challenge.name if public_challenge else 'Hidden challenge',
+                'category': challenge.category if public_challenge else None,
                 'points': points,
                 'timestamp': datetime.utcnow().isoformat(),
             })

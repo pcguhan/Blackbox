@@ -95,6 +95,13 @@ def view_team(team_id):
     
     is_member = current_user.team_id == team_id
     is_captain = current_user.id == team.captain_id
+
+    # Other teams only see solves of challenges they can see themselves.
+    if progress and not is_member and not current_user.is_admin:
+        from models.challenge import Challenge
+        from services.challenge_catalog import visible_challenges_query
+        visible_ids = {cid for cid, in visible_challenges_query(current_user).with_entities(Challenge.id)}
+        progress['solves'] = [solve for solve in progress['solves'] if solve['challenge_id'] in visible_ids]
     
     # Include invite code only for team members
     team_data = team.to_dict(include_members=True, include_invite_code=is_member)
