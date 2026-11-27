@@ -12,6 +12,9 @@ from models.hint import Hint, HintUnlock
 from models.settings import Settings
 from services.cache import cache_service
 from services.file_storage import file_storage
+from services.scoring import ScoringService
+from services.standings import publish_standings, team_standings_enabled
+from utils.audit import log_audit_event
 import json
 from models.notification import Notification
 from services.websocket import WebSocketService
@@ -73,6 +76,9 @@ def manage_challenges():
             query = query.order_by(Challenge.name.asc())
 
     challenges = query.all()
+    counts = ScoringService.get_challenge_solve_counts(team_standings_enabled())
+    for challenge in challenges:
+        challenge.solve_count = counts.get(challenge.id, 0)
     return render_template('admin/challenges.html', challenges=challenges, current_sort=sort, current_order=order)
 
 
@@ -256,6 +262,8 @@ def create_challenge():
         db.session.commit()
         
         cache_service.invalidate_all_challenges()
+        cache_service.invalidate_scoring()
+        publish_standings()
         
         flash(f'Challenge "{challenge.name}" created successfully!', 'success')
         
@@ -507,8 +515,9 @@ def edit_challenge(challenge_id):
         
         db.session.commit()
         
-        cache_service.invalidate_challenge(challenge_id)
         cache_service.invalidate_all_challenges()
+        cache_service.invalidate_scoring()
+        publish_standings()
         
         flash(f'Challenge "{challenge.name}" updated successfully!', 'success')
         return redirect(url_for('admin.manage_challenges'))
@@ -546,12 +555,10 @@ def edit_challenge(challenge_id):
 @admin_required
 def delete_challenge(challenge_id):
     """Delete a challenge"""
-    challenge = Challenge.query.get_or_404(challenge_id)
+    challenge = Challenge.query.filter_by(id=challenge_id).with_for_update().first_or_404()
     
     # Delete associated data in correct order (respecting foreign key constraints)
     from models.branching import ChallengeFlag, ChallengePrerequisite, ChallengeUnlock
-    from models.hint import HintUnlock
-    
     # Step 1: Delete solves (references challenge_flags.id)
     Solve.query.filter_by(challenge_id=challenge_id).delete()
     
@@ -559,6 +566,8 @@ def delete_challenge(challenge_id):
     Submission.query.filter_by(challenge_id=challenge_id).delete()
     
     # Step 3: Delete hint unlocks (references hints.id)
+    hint_ids = db.session.query(Hint.id).filter(Hint.challenge_id == challenge_id)
+    HintUnlock.query.filter(HintUnlock.hint_id.in_(hint_ids)).delete(synchronize_session=False)
     Hint.query.filter_by(challenge_id=challenge_id).delete()
     
     # Step 4: Delete unlock records
@@ -578,6 +587,9 @@ def delete_challenge(challenge_id):
     )
     
     # Step 7: Delete all flags for this challenge
+    flag_ids = db.session.query(ChallengeFlag.id).filter(ChallengeFlag.challenge_id == challenge_id)
+    ChallengeUnlock.query.filter(ChallengeUnlock.unlocked_by_flag_id.in_(flag_ids)).delete(synchronize_session=False)
+    Solve.query.filter(Solve.flag_id.in_(flag_ids)).update({Solve.flag_id: None}, synchronize_session=False)
     ChallengeFlag.query.filter_by(challenge_id=challenge_id).delete()
 
     # Step 7a: Delete container instances and related events for this challenge
@@ -630,10 +642,10 @@ def delete_challenge(challenge_id):
     db.session.delete(challenge)
     db.session.commit()
     
-    cache_service.invalidate_challenge(challenge_id)
     cache_service.invalidate_all_challenges()
-    cache_service.invalidate_scoreboard()
-    
+    cache_service.invalidate_scoring()
+    publish_standings()
+
     return jsonify({'success': True, 'message': 'Challenge deleted'})
 
 
@@ -647,8 +659,9 @@ def toggle_challenge_enabled(challenge_id):
     challenge.is_enabled = not challenge.is_enabled
     db.session.commit()
     
-    cache_service.invalidate_challenge(challenge_id)
     cache_service.invalidate_all_challenges()
+    cache_service.invalidate_scoring()
+    publish_standings()
     
     status = "enabled" if challenge.is_enabled else "disabled"
     return jsonify({
@@ -658,44 +671,59 @@ def toggle_challenge_enabled(challenge_id):
     })
 
 
+def _delete_attachment(attachment):
+    from pathlib import Path
+
+    challenge = Challenge.query.filter_by(id=attachment.challenge_id).with_for_update().first_or_404()
+    field = 'images' if attachment.is_image else 'files'
+    url = attachment.get_download_url()
+    try:
+        entries = json.loads(getattr(challenge, field) or '[]')
+    except json.JSONDecodeError:
+        entries = None
+    if isinstance(entries, list):
+        remaining = [entry for entry in entries
+                     if (entry.get('url') if isinstance(entry, dict) else entry) != url]
+        setattr(challenge, field, json.dumps(remaining))
+
+    if not file_storage.delete_file(attachment.filepath) and Path(attachment.filepath).exists():
+        db.session.rollback()
+        return jsonify({'success': False, 'message': 'Could not remove the attachment from storage'}), 500
+
+    db.session.delete(attachment)
+    db.session.commit()
+    cache_service.invalidate_scoring(challenge.id)
+    label = 'Image' if attachment.is_image else 'File'
+    return jsonify({'success': True, 'message': f'{label} deleted'})
+
+
 @admin_bp.route('/challenges/files/<int:file_id>/delete', methods=['POST'])
 @login_required
 @admin_required
 def delete_challenge_file(file_id):
-    """Delete a challenge file"""
-    challenge_file = ChallengeFile.query.get_or_404(file_id)
-    challenge_id = challenge_file.challenge_id
-    
-    # Delete physical file
-    file_storage.delete_file(challenge_file.filepath)
-    
-    # Delete database record
-    db.session.delete(challenge_file)
-    db.session.commit()
-    
-    cache_service.invalidate_challenge(challenge_id)
-    
-    return jsonify({'success': True, 'message': 'File deleted'})
+    """Delete a challenge file."""
+    return _delete_attachment(ChallengeFile.query.get_or_404(file_id))
 
 
 @admin_bp.route('/challenges/images/<int:image_id>/delete', methods=['POST'])
 @login_required
 @admin_required
 def delete_challenge_image(image_id):
-    """Delete a challenge image"""
-    challenge_image = ChallengeFile.query.get_or_404(image_id)
-    challenge_id = challenge_image.challenge_id
-    
-    # Delete physical file
-    file_storage.delete_file(challenge_image.filepath)
-    
-    # Delete database record
-    db.session.delete(challenge_image)
+    """Delete a challenge image."""
+    return _delete_attachment(ChallengeFile.query.get_or_404(image_id))
+
+
+def _detach_and_delete_flag(flag):
+    from models.branching import ChallengeUnlock
+
+    challenge_id = flag.challenge_id
+    Challenge.query.filter_by(id=challenge_id).with_for_update().first_or_404()
+    ChallengeUnlock.query.filter_by(unlocked_by_flag_id=flag.id).delete()
+    Solve.query.filter_by(flag_id=flag.id).update({Solve.flag_id: None})
+    db.session.delete(flag)
     db.session.commit()
-    
-    cache_service.invalidate_challenge(challenge_id)
-    
-    return jsonify({'success': True, 'message': 'Image deleted'})
+    cache_service.invalidate_all_challenges()
+    cache_service.invalidate_scoring()
 
 
 @admin_bp.route('/challenges/flags/<int:flag_id>/delete', methods=['POST'])
@@ -709,18 +737,8 @@ def delete_challenge_flag(flag_id):
     if flag.flag_label == 'Primary Flag':
         return jsonify({'success': False, 'message': 'Cannot delete the primary flag'}), 400
         
-    challenge_id = flag.challenge_id
-    
-    # Check if this flag unlocks anything
-    from models.branching import ChallengeUnlock
-    ChallengeUnlock.query.filter_by(unlocked_by_flag_id=flag.id).delete()
-    
-    db.session.delete(flag)
-    db.session.commit()
-    
-    cache_service.invalidate_challenge(challenge_id)
-    cache_service.invalidate_all_challenges()
-    
+    _detach_and_delete_flag(flag)
+
     return jsonify({'success': True, 'message': 'Flag deleted'})
 
 
@@ -746,6 +764,8 @@ def toggle_admin(user_id):
     
     user.is_admin = not user.is_admin
     db.session.commit()
+    cache_service.invalidate_scoring()
+    publish_standings()
     
     return jsonify({
         'success': True,
@@ -766,6 +786,8 @@ def toggle_active(user_id):
     
     user.is_active = not user.is_active
     db.session.commit()
+    cache_service.invalidate_scoring()
+    publish_standings()
     
     return jsonify({
         'success': True,
@@ -800,8 +822,8 @@ def delete_team(team_id):
     db.session.delete(team)
     db.session.commit()
     
-    cache_service.invalidate_team(team_id)
-    cache_service.invalidate_scoreboard()
+    cache_service.invalidate_scoring()
+    publish_standings()
     
     return jsonify({'success': True, 'message': 'Team deleted'})
 
@@ -812,23 +834,26 @@ def delete_team(team_id):
 @admin_required
 def adjust_user_points(user_id):
     """Manually adjust user points by creating a solve adjustment"""
-    from models.submission import Solve
-    from models.challenge import Challenge
-    
     user = User.query.get_or_404(user_id)
-    data = request.get_json()
-    
-    points_delta = int(data.get('points', 0))
+    if user.is_admin:
+        return jsonify({'success': False, 'message': 'Admin accounts do not have a score.'}), 400
+    data = request.get_json(silent=True)
+    points_delta = data.get('points') if isinstance(data, dict) else None
+    if isinstance(points_delta, str):
+        try:
+            points_delta = int(points_delta)
+        except ValueError:
+            pass
+    if type(points_delta) is not int:
+        return jsonify({'success': False, 'message': 'Points must be an integer'}), 400
     reason = data.get('reason', 'Manual adjustment by admin')
     
     if points_delta == 0:
         return jsonify({'success': False, 'message': 'Points delta cannot be zero'}), 400
     
-    # Create a "virtual" solve record for tracking score adjustments
-    # We'll create a challenge with ID 0 that represents manual adjustments
     adjustment = Solve(
         user_id=user_id,
-        team_id=user.team_id,
+        team_id=user.team_id if team_standings_enabled() else None,
         challenge_id=None,  # None indicates manual adjustment
         points_earned=points_delta,
         solved_at=datetime.utcnow()
@@ -837,11 +862,13 @@ def adjust_user_points(user_id):
     db.session.add(adjustment)
     db.session.commit()
     
-    cache_service.invalidate_scoreboard()
-    if user.team_id:
-        cache_service.invalidate_team(user.team_id)
-    cache_service.invalidate_user(user_id)
-    
+    log_audit_event(
+        user_id=current_user.id, team_id=adjustment.team_id, action='ADJUST_POINTS',
+        details={'target_user_id': user_id, 'points': points_delta, 'reason': reason},
+    )
+    cache_service.invalidate_scoring()
+    publish_standings()
+
     return jsonify({
         'success': True,
         'new_score': user.get_score(),
@@ -857,9 +884,15 @@ def adjust_team_points(team_id):
     from models.submission import Solve
     
     team = Team.query.get_or_404(team_id)
-    data = request.get_json()
-    
-    points_delta = int(data.get('points', 0))
+    data = request.get_json(silent=True)
+    points_delta = data.get('points') if isinstance(data, dict) else None
+    if isinstance(points_delta, str):
+        try:
+            points_delta = int(points_delta)
+        except ValueError:
+            pass
+    if type(points_delta) is not int:
+        return jsonify({'success': False, 'message': 'Points must be an integer'}), 400
     reason = data.get('reason', 'Manual adjustment by admin')
     
     if points_delta == 0:
@@ -877,9 +910,13 @@ def adjust_team_points(team_id):
     db.session.add(adjustment)
     db.session.commit()
     
-    cache_service.invalidate_scoreboard()
-    cache_service.invalidate_team(team_id)
-    
+    log_audit_event(
+        user_id=current_user.id, team_id=adjustment.team_id, action='ADJUST_POINTS',
+        details={'target_team_id': team_id, 'points': points_delta, 'reason': reason},
+    )
+    cache_service.invalidate_scoring()
+    publish_standings()
+
     return jsonify({
         'success': True,
         'new_score': team.get_score(),
@@ -1100,10 +1137,6 @@ def update_event_config():
         from services.websocket import socketio
         socketio.emit('scoreboard_visibility', {'visible': scoreboard_visible}, namespace='/live', to='scoreboard_authenticated')
         
-        from services.standings import set_frozen, frozen_snapshot
-        set_frozen('scoreboard_frozen' in request.form)
-        socketio.emit('scoreboard_freeze', {'frozen': bool(frozen_snapshot())}, namespace='/live', to='scoreboard_authenticated')
-
         # Update first blood bonus
         first_blood_bonus = request.form.get('first_blood_bonus', '0')
         try:
@@ -1117,6 +1150,13 @@ def update_event_config():
         if decay_function in ['logarithmic', 'parabolic']:
             Settings.set('decay_function', decay_function, 'string', 'Dynamic scoring decay function')
         
+        cache_service.invalidate_all_challenges()
+        cache_service.invalidate_scoring()
+        from services.standings import set_frozen, frozen_snapshot
+        set_frozen('scoreboard_frozen' in request.form)
+        socketio.emit('scoreboard_freeze', {'frozen': bool(frozen_snapshot())}, namespace='/live', to='scoreboard_authenticated')
+        publish_standings()
+
         # Handle logo upload
         if 'ctf_logo' in request.files:
             logo_file = request.files['ctf_logo']
@@ -1369,7 +1409,8 @@ def delete_hint(hint_id):
     db.session.delete(hint)
     db.session.commit()
     
-    cache_service.invalidate_challenge(challenge_id)
+    cache_service.invalidate_scoring(challenge_id)
+    publish_standings()
     
     return jsonify({
         'success': True,
@@ -1481,13 +1522,8 @@ def delete_flag(flag_id):
     from models.branching import ChallengeFlag
     
     flag = ChallengeFlag.query.get_or_404(flag_id)
-    challenge_id = flag.challenge_id
-    
-    db.session.delete(flag)
-    db.session.commit()
-    
-    cache_service.invalidate_challenge(challenge_id)
-    
+    _detach_and_delete_flag(flag)
+
     return jsonify({'success': True, 'message': 'Flag deleted successfully'})
 
 

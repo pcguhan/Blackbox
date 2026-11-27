@@ -5,6 +5,8 @@ from models.hint import Hint, HintUnlock
 from models.challenge import Challenge
 from models.user import User
 from models.team import Team
+from services.cache import cache_service
+from services.standings import publish_standings, team_standings_enabled
 
 hints_bp = Blueprint('hints', __name__, url_prefix='/hints')
 
@@ -16,7 +18,7 @@ def get_challenge_hints(challenge_id):
     challenge = Challenge.query.get_or_404(challenge_id)
 
     # Get user's team (needed for unlock checks)
-    team = current_user.get_team()
+    team = current_user.get_team() if team_standings_enabled() else None
     team_id = team.id if team else None
 
     # Only allow access if challenge is unlocked for this user/team or user is admin
@@ -60,11 +62,14 @@ def get_challenge_hints(challenge_id):
 @login_required
 def unlock_hint(hint_id):
     """Unlock a hint by paying the cost"""
+    if current_user.is_admin:
+        return jsonify({'success': False, 'message': 'Admins can preview hints from the challenge page.'}), 403
+
     hint = Hint.query.get_or_404(hint_id)
     challenge = hint.challenge
 
     # Get user's team (needed for unlock checks)
-    team = current_user.get_team()
+    team = current_user.get_team() if team_standings_enabled() else None
     team_id = team.id if team else None
 
     # Only allow unlocking hints if the challenge is unlocked for this user/team or user is admin
@@ -132,7 +137,9 @@ def unlock_hint(hint_id):
 
         
         db.session.commit()
-        
+        cache_service.invalidate_scoring(challenge.id)
+        publish_standings()
+
         return jsonify({
             'success': True,
             'message': f'Hint unlocked for {hint.cost} points',
@@ -211,6 +218,8 @@ def admin_manage_hint(hint_id):
         try:
             db.session.delete(hint)
             db.session.commit()
+            cache_service.invalidate_scoring(hint.challenge_id)
+            publish_standings()
             return jsonify({'success': True, 'message': 'Hint deleted successfully'})
         except Exception as e:
             db.session.rollback()

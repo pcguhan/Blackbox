@@ -313,6 +313,9 @@ if not app.testing:
         except Exception as e:
             app.logger.warning(f"Could not ensure docker DB schema on startup: {e}")
 
+        from scripts.schema_scoring import ensure_scoring_schema
+        ensure_scoring_schema()
+
     # Initialize container reconciliation background task
     try:
         import threading

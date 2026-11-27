@@ -1,7 +1,9 @@
 import json
 import redis
 from flask_caching import Cache
+from contextlib import contextmanager
 from decimal import Decimal
+from uuid import uuid4
 
 cache = Cache()
 
@@ -49,6 +51,43 @@ class CacheService:
         self.redis_client.delete('scoreboard:individual')
         self.redis_client.delete('scoreboard_team', 'scoreboard_individual')
     
+    def invalidate_scoring(self, challenge_id=None):
+        """Drop cached values affected by a scoring or participant change."""
+        self.invalidate_scoreboard()
+        self.invalidate_stats()
+        keys = [key for pattern in ('team:*:score', 'user:*:score')
+                for key in self.redis_client.scan_iter(match=pattern)]
+        if keys:
+            self.redis_client.delete(*keys)
+        if challenge_id is not None:
+            self.invalidate_challenge(challenge_id)
+
+    def invalidate_stats(self):
+        self.redis_client.delete('stats:platform')
+
+    @contextmanager
+    def solve_lock(self, challenge_id, team_id, user_id):
+        owner = f'team:{team_id}' if team_id is not None else f'user:{user_id}'
+        key = f'solve_lock:{challenge_id}:{owner}'
+        token = uuid4().hex
+        acquired = self.redis_client.set(key, token, nx=True, ex=10)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                # Compare and delete atomically in case this lock expired and was replaced.
+                with self.redis_client.pipeline() as pipe:
+                    while True:
+                        try:
+                            pipe.watch(key)
+                            if pipe.get(key) == token:
+                                pipe.multi()
+                                pipe.delete(key)
+                                pipe.execute()
+                            break
+                        except redis.WatchError:
+                            continue
+
     # Challenge caching
     def get_challenge(self, challenge_id):
         """Get cached challenge"""

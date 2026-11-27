@@ -8,7 +8,7 @@ from flask_login import login_required, current_user
 from models import db
 from models.container import ContainerInstance, ContainerEvent
 from models.challenge import Challenge
-from models.settings import DockerSettings
+from models.settings import DockerSettings, Settings
 from services.container_manager import container_orchestrator
 from datetime import datetime
 
@@ -26,7 +26,7 @@ def start_container():
             return jsonify({'success': False, 'error': 'Missing challenge_id'}), 400
         
         # Get user's team (if any)
-        team = current_user.get_team()
+        team = current_user.get_team() if Settings.get('teams_enabled', True, type='bool') else None
         team_id = team.id if team else None
         
         # Start container
@@ -89,7 +89,7 @@ def revert_container():
             return jsonify({'success': False, 'error': 'Missing challenge_id'}), 400
         
         # Get user's team (if any)
-        team = current_user.get_team()
+        team = current_user.get_team() if Settings.get('teams_enabled', True, type='bool') else None
         team_id = team.id if team else None
         
         result = container_orchestrator.revert_container(

@@ -1,27 +1,53 @@
 {% extends "base.html" %}
 {% block title %}Leaderboard - {{ ctf_name }}{% endblock %}
+{% block extra_css %}<link rel="stylesheet" href="{{ url_for('static', filename='css/scoreboard.css') }}">{% endblock %}
 {% block content %}
 <div class="leaderboard-heading">
-    <div><p class="eyebrow">CYSCOM / competition standings</p><h1 class="mb-2">Leaderboard</h1><p class="text-muted mb-0">Current rankings &middot; {% if teams_enabled %}teams{% else %}individuals{% endif %}</p></div>
+    <h1 id="leaderboardTitle">{% if teams_enabled %}Team leaderboard{% else %}Individual leaderboard{% endif %}</h1>
     <div class="leaderboard-tools">
-        <div class="connection-status" id="scoreboardStatus" hidden data-state="loading"><span class="live-dot" aria-hidden="true"></span><span id="scoreboardStatusText">Connecting&hellip;</span></div>
-        <label for="standingsView" class="visually-hidden">Standings view</label><select id="standingsView" class="form-select"><option value="top">Top 100</option><option value="nearby">Near my rank</option></select>
+        <div class="connection-status" id="scoreboardStatus" data-state="loading">
+            <span class="live-dot" aria-hidden="true"></span><span id="scoreboardStatusText">Connecting&hellip;</span>
+        </div>
+        <label for="standingsView" class="visually-hidden">Standings view</label>
+        <select id="standingsView" class="form-select">
+            <option value="top">Top 100</option>
+            {% if not current_user.is_admin %}<option value="nearby">Near my rank</option>{% endif %}
+        </select>
         <button type="button" class="btn btn-outline-primary" id="refreshScoreboard">Refresh</button>
     </div>
 </div>
 <p id="freezeNotice" class="alert alert-warning" hidden role="status"></p>
+<section id="yourStanding" class="your-standing" hidden aria-labelledby="yourStandingTitle">
+    <div><h2 id="yourStandingTitle">Your standing</h2><div id="yourEntrant"></div></div>
+    <dl class="standing-metrics">
+        <div><dt>Rank</dt><dd id="yourRank"></dd></div>
+        <div><dt>Score</dt><dd id="yourScore"></dd></div>
+        <div><dt>Solves</dt><dd id="yourSolves"></dd></div>
+        <div><dt>First bloods</dt><dd id="yourFirstBloods"></dd></div>
+    </dl>
+</section>
 <div class="leaderboard-stage">
     <img class="leaderboard-mark" src="{{ url_for('static', filename='images/cyscom-logo.webp') }}" alt="" aria-hidden="true">
     <div class="leaderboard-panel">
         <div class="table-responsive">
-            <table class="table scoreboard-table mb-0" id="scoreboardTable" data-entrant-id="{{ current_user.team_id if teams_enabled else current_user.id }}" data-is-admin="{{ 'true' if current_user.is_admin else 'false' }}">
+            <table class="table scoreboard-table mb-0" id="scoreboardTable"
+                   data-view-url="{{ url_for('scoreboard.get_scoreboard_view') }}"
+                   data-is-admin="{{ 'true' if current_user.is_admin else 'false' }}">
                 <caption class="visually-hidden">Current competition standings, ranked by score.</caption>
-                <thead><tr><th scope="col">Rank</th><th scope="col">{% if teams_enabled %}Team{% else %}Participant{% endif %}</th><th scope="col" class="text-end">Score</th><th scope="col" class="text-center">Solves</th></tr></thead>
-                <tbody id="scoreboardBody"><tr><td colspan="4" class="text-center py-5 text-muted">Loading rankings&hellip;</td></tr></tbody>
+                <thead>
+                    <tr>
+                        <th scope="col">Rank</th>
+                        <th scope="col" id="entrantHeading">{% if teams_enabled %}Team{% else %}Participant{% endif %}</th>
+                        <th scope="col" class="text-end">Score</th>
+                        <th scope="col" class="text-center">Solves</th>
+                        <th scope="col" class="text-center">First bloods</th>
+                    </tr>
+                </thead>
+                <tbody id="scoreboardBody"><tr><td colspan="5" class="text-center py-5 text-muted">Loading rankings&hellip;</td></tr></tbody>
             </table>
         </div>
     </div>
 </div>
-<div class="leaderboard-note"><span>Points reflect the current challenge values.</span><span id="scoreboardUpdated" aria-live="polite">Waiting for first update</span></div>
+<div class="leaderboard-note"><span id="scoreboardUpdated" aria-live="polite"></span></div>
 {% endblock %}
 {% block extra_js %}<script src="{{ url_for('static', filename='js/scoreboard.js') }}"></script>{% endblock %}

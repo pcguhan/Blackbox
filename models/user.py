@@ -50,7 +50,10 @@ class User(UserMixin, db.Model):
         For dynamic challenges: Recalculates based on current challenge value
         For static challenges: Uses stored points_earned
         """
-        if self.team_id:
+        from models.settings import Settings
+        if self.is_admin:
+            return 0
+        if self.team_id and Settings.get('teams_enabled', True, type='bool'):
             team = self.get_team()
             return team.get_score() if team else 0
         else:
