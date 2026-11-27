@@ -311,58 +311,8 @@
                 </div>
             </div>
             
-            <!-- Custom Background Theme -->
-            <div class="card mb-4">
-                <div class="card-header bg-info text-white">
-                    <h5 class="mb-0"><i class="bi bi-palette"></i> Custom Background Theme</h5>
-                </div>
-                <div class="card-body">
-                    <form method="POST" action="{{ url_for('admin.update_background_theme') }}">
-                        <div class="mb-3">
-                            <label for="adminThemeSelect" class="form-label"><strong>Colour palette</strong></label>
-                            <select class="form-select" id="adminThemeSelect" name="site_theme">
-                                {% for value, label in [('default', 'Default'), ('graphite', 'Graphite'), ('forest', 'Forest'), ('copper', 'Copper'), ('paper', 'Paper')] %}
-                                <option value="{{ value }}" {% if settings.get('site_theme', 'default') == value %}selected{% endif %}>{{ label }}</option>
-                                {% endfor %}
-                            </select>
-                            <div class="form-text" id="adminThemeNotice" role="status">The saved palette applies to the whole site. Theme changes are managed here by administrators.</div>
-                        </div>
-                        <div class="mb-3">
-                            <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" id="custom_background_enabled" name="custom_background_enabled" 
-                                       {% if settings.get('custom_background_enabled', False) %}checked{% endif %}>
-                                <label class="form-check-label" for="custom_background_enabled">
-                                    <strong>Enable Custom Background</strong>
-                                </label>
-                            </div>
-                            <div class="form-text">Enable custom background styling for the entire platform</div>
-                        </div>
-                        
-                        <div class="mb-3">
-                            <label for="custom_background_css" class="form-label"><strong>Custom Background CSS</strong></label>
-                            <textarea class="form-control font-monospace" id="custom_background_css" name="custom_background_css" rows="5" placeholder="body { background-color: #11171d; }">{{ settings.get('custom_background_css', '') }}</textarea>
-                            <div class="form-text">Optional custom background CSS. The selected palette controls text and surfaces throughout the site.</div>
-                        </div>
-                        <div class="mb-3">
-                            <p>Theme presets</p>
-                            <div class="d-flex flex-wrap gap-2">
-                                <button type="button" class="btn btn-outline-secondary" onclick="applyExample(1)">Default</button>
-                                <button type="button" class="btn btn-outline-secondary" onclick="applyExample(2)">Forest</button>
-                                <button type="button" class="btn btn-outline-secondary" onclick="applyExample(3)">Copper</button>
-                                <button type="button" class="btn btn-outline-secondary" onclick="applyExample(4)">Paper</button>
-                                <button type="button" class="btn btn-outline-secondary" onclick="applyExample(5)">Graphite</button>
-                            </div>
-                        </div>
-                        <button type="submit" class="btn btn-primary">
-                            <i class="bi bi-save"></i> Save Background Theme
-                        </button>
-                        <button type="button" class="btn btn-secondary" onclick="previewBackground()">
-                            <i class="bi bi-eye"></i> Preview
-                        </button>
-                    </form>
-                </div>
-            </div>
-        
+            {% include 'admin/partials/_appearance.html' %}
+
         <div class="card mb-4">
             <div class="card-header">
                 <h5 class="mb-0"><i class="bi bi-info-circle"></i> System Information</h5>
@@ -393,52 +343,6 @@
 // Helper function to get Flask version
 function getFlaskVersion() {
     return '{{ flask_version }}';
-}
-
-// Background theme examples
-const examples = {
-    1: 'body { background-color: var(--canvas); }',
-    2: 'body { background-color: var(--canvas); }',
-    3: 'body { background-color: var(--canvas); }',
-    4: 'body { background-color: var(--canvas); }'
-};
-
-function applyExample(num) {
-    const palette = ['default', 'forest', 'copper', 'paper', 'graphite'][num - 1];
-    const selector = document.getElementById('adminThemeSelect');
-    selector.value = palette;
-    selector.dispatchEvent(new Event('change'));
-    document.getElementById('custom_background_css').value = examples[num];
-    document.getElementById('custom_background_enabled').checked = true;
-}
-
-function previewBackground() {
-    const css = document.getElementById('custom_background_css').value;
-    const enabled = document.getElementById('custom_background_enabled').checked;
-    
-    if (!enabled) {
-        alert('Enable "Custom Background" first to preview.');
-        return;
-    }
-    
-    if (!css.trim()) {
-        alert('Enter some CSS code to preview.');
-        return;
-    }
-    
-    // Remove existing preview style
-    const existingStyle = document.getElementById('preview-background-style');
-    if (existingStyle) {
-        existingStyle.remove();
-    }
-    
-    // Apply preview
-    const style = document.createElement('style');
-    style.id = 'preview-background-style';
-    style.textContent = css;
-    document.head.appendChild(style);
-    
-    alert('Preview applied! Scroll around to see the effect. Save to make it permanent.');
 }
 </script>
 {% endblock %}

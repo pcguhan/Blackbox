@@ -1187,61 +1187,9 @@ def update_email_config():
 
 
 @admin_bp.route('/settings/background-theme', methods=['POST'])
-@login_required
-@admin_required
 def update_background_theme():
-    """Update custom background theme"""
-    from models.settings import Settings
-    import re
-    
-    try:
-        site_theme = request.form.get('site_theme', Settings.get('site_theme', 'default'))
-        if site_theme not in ('default', 'graphite', 'forest', 'copper', 'paper'):
-            flash('Choose one of the available colour palettes.', 'error')
-            return redirect(url_for('admin.settings'))
-        Settings.set('site_theme', site_theme, 'string', 'Site colour palette selected by administrators')
-        enabled = 'custom_background_enabled' in request.form
-        Settings.set('custom_background_enabled', enabled, 'bool', 'Enable custom background theme')
-        
-        if enabled:
-            css = request.form.get('custom_background_css', '').strip()
-            
-            # Security: Only allow background-related CSS properties
-            # NOTE: This feature is restricted to ADMINS ONLY. Users cannot modify this setting.
-            allowed_properties = [
-                'background', 'background-color', 'background-image', 
-                'background-size', 'background-position', 'background-repeat',
-                'background-attachment', 'animation', '@keyframes'
-            ]
-            
-            # Very basic validation - check if it contains only allowed properties
-            # This is a simple check, not a full CSS parser
-            if css:
-                # Remove comments
-                css_clean = re.sub(r'/\*.*?\*/', '', css, flags=re.DOTALL)
-                
-                # Check for potentially dangerous content
-                # Enhanced blacklist for XSS prevention
-                dangerous_patterns = [
-                    r'<script', r'javascript:', r'onerror', r'onload',
-                    r'eval\(', r'expression\(', r'import\s+["\']',
-                    r'behavior:', r'binding:', r'-moz-binding'
-                ]
-                
-                for pattern in dangerous_patterns:
-                    if re.search(pattern, css_clean, re.IGNORECASE):
-                        flash('Invalid CSS: Potentially dangerous content detected', 'error')
-                        return redirect(url_for('admin.settings'))
-                
-                Settings.set('custom_background_css', css, 'string', 'Custom background CSS')
-            else:
-                Settings.set('custom_background_css', '', 'string', 'Custom background CSS')
-        
-        flash('Background theme updated successfully!', 'success')
-    except Exception as e:
-        flash(f'Error updating background theme: {str(e)}', 'error')
-    
-    return redirect(url_for('admin.settings'))
+    from routes.appearance_admin import update_appearance
+    return update_appearance()
 
 
 @admin_bp.route('/update-system-settings', methods=['POST'])
