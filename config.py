@@ -77,6 +77,8 @@ class Config:
     # Server
     HOST = os.getenv('HOST', '0.0.0.0')
     PORT = int(os.getenv('PORT', 5000))
+    CHALLENGE_HOST = os.getenv('CHALLENGE_HOST', '').strip()
+    CHALLENGE_BIND_ADDRESS = os.getenv('CHALLENGE_BIND_ADDRESS', '0.0.0.0')
     
     # File Upload
     UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads'))

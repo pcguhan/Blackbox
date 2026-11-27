@@ -257,7 +257,10 @@ def view_challenge(challenge_id):
     # Check if challenge has branching (multiple paths)
     from models.branching import ChallengeFlag, ChallengeUnlock
     challenge_flags = ChallengeFlag.query.filter_by(challenge_id=challenge_id).all()
-    has_branching = len(challenge_flags) > 1
+    has_branching = (
+        any(flag.unlocks_challenge_id for flag in challenge_flags)
+        if challenge.docker_enabled else len(challenge_flags) > 1
+    )
     challenge_data['has_branching'] = has_branching
     
     # Get unlocked paths for this user/team
@@ -456,7 +459,7 @@ def submit_flag(challenge_id):
     has_branching = len(challenge_flags) > 1
     
     # If already solved and challenge has no branching, reject submission
-    if already_solved and not has_branching:
+    if already_solved and (challenge.docker_enabled or not has_branching):
         return jsonify({'success': False, 'message': 'This challenge has already been solved'}), 400
     
     # Check max attempts limit (0 means unlimited)
@@ -504,7 +507,6 @@ def submit_flag(challenge_id):
     if not is_correct and challenge.docker_enabled:
         from services.container_manager import ContainerOrchestrator
         from models.flag_abuse import FlagAbuseAttempt
-        from models.container import ContainerInstance
         
         parsed_flag = ContainerOrchestrator.parse_dynamic_flag(submitted_flag)
         if parsed_flag and parsed_flag.get('is_valid'):
@@ -533,51 +535,11 @@ def submit_flag(challenge_id):
                     # It's a user flag (no team) - the flag contains user_id
                     flag_user_id = flag_instance_id
                     
-                    # Check if the flag belongs to the current user
-                    if flag_user_id == current_user.id:
-                        # Verify the flag against the active container for this user/challenge
-                        # or check the cache mapping
-                        mapping_key = f"dynamic_flag_mapping:{challenge_id}:user_{flag_user_id}"
-                        mapping_flag = cache_service.get(mapping_key)
-                        
-                        # Also check active container if available (more reliable if cache expired but container running)
-                        instance = ContainerInstance.query.filter_by(
-                            user_id=current_user.id, 
-                            challenge_id=challenge_id,
-                            status='running'
-                        ).first()
-                        
-                        instance_flag = getattr(instance, 'dynamic_flag', None) if instance else None
-                        expected_flag = instance_flag or mapping_flag
-                        
-                        if expected_flag:
-                            case_sens = getattr(challenge, 'flag_case_sensitive', True)
-                            flag_matched = (submitted_flag == expected_flag)
-                            if not flag_matched and not case_sens:
-                                flag_matched = (submitted_flag.lower() == expected_flag.lower())
-                            
-                            if flag_matched:
-                                is_correct = True
-                                # Return a lightweight dynamic flag match object so downstream logic
-                                # (award points, create submission) works the same as Challenge.check_flag
-
-                                class _DynamicFlagMatch:
-                                    def __init__(self, value, case_sensitive):
-                                        self.id = None
-                                        self.is_regex = False
-                                        self.is_case_sensitive = case_sensitive
-                                        self.flag_value = value
-                                        self.points_override = None
-                                        self.unlocks_challenge_id = None
-                                        self.flag_label = None
-
-                                matched_flag = _DynamicFlagMatch(submitted_flag, case_sens)
-                            # else: Flag format valid but doesn't match expected flag for this user
-                    else:
-                        # Flag belongs to another user
+                    if flag_user_id != current_user.id or (flag_team_id and flag_team_id != team_id):
                         is_wrong_team = True
                         actual_owner_user_id = flag_user_id
-            
+                        actual_owner_team_id = flag_team_id
+
             # Log the flag sharing attempt
             if is_wrong_team:
                 # Validate that referenced entities exist (to avoid FK constraint errors)
@@ -875,18 +837,6 @@ def submit_flag(challenge_id):
         )
         db.session.add(solve)
         
-        # Auto-stop container if challenge has one (cleanup after solve)
-        if challenge.docker_enabled:
-            try:
-                from services.container_manager import container_orchestrator
-                stop_result = container_orchestrator.stop_container(challenge_id, current_user.id, force=True)
-                if stop_result.get('success'):
-                    current_app.logger.info(f"Auto-stopped container for solved challenge {challenge_id} by user {current_user.id}")
-                else:
-                    current_app.logger.warning(f"Failed to auto-stop container for solved challenge {challenge_id}: {stop_result.get('error', 'Unknown error')}")
-            except Exception as e:
-                current_app.logger.error(f"Error auto-stopping container for solved challenge {challenge_id}: {e}")
-        
         # Handle challenge unlocking via flags and prerequisites
         from models.branching import ChallengeUnlock, ChallengePrerequisite
         unlocked_challenges = []
@@ -1001,6 +951,16 @@ def submit_flag(challenge_id):
                 return jsonify({'success': False, 'message': 'This challenge has already been solved'}), 400
             raise
         
+        if challenge.docker_enabled:
+            from services.container_manager import container_orchestrator
+
+            stop_result = container_orchestrator.stop_container(
+                challenge_id, current_user.id, force=True, on_solve=True,
+                session_id=matched_flag.container_session_id,
+            )
+            if not stop_result['success']:
+                current_app.logger.warning('Container cleanup after solve failed: %s', stop_result['error'])
+
         # Invalidate caches
         cache_service.invalidate_scoreboard()
         cache_service.invalidate_challenge(challenge_id)
@@ -1143,7 +1103,10 @@ def explore_flag(challenge_id):
     
     # Check if this challenge has branching flags
     challenge_flags = ChallengeFlag.query.filter_by(challenge_id=challenge_id).all()
-    has_branching = len(challenge_flags) > 1
+    has_branching = (
+        any(flag.unlocks_challenge_id for flag in challenge_flags)
+        if challenge.docker_enabled else len(challenge_flags) > 1
+    )
     
     if not has_branching:
         return jsonify({
@@ -1167,7 +1130,10 @@ def explore_flag(challenge_id):
         }), 429
     
     # Check the flag
-    matched_flag = challenge.check_flag(submitted_flag, team_id=team_id, user_id=current_user.id)
+    if challenge.docker_enabled:
+        matched_flag = challenge.check_docker_unlock_flag(submitted_flag, team_id, current_user.id)
+    else:
+        matched_flag = challenge.check_flag(submitted_flag, team_id=team_id, user_id=current_user.id)
     
     if not matched_flag:
         return jsonify({'success': False, 'message': 'Incorrect flag'}), 400

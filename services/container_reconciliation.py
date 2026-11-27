@@ -1,160 +1,102 @@
 """
-Container Reconciliation Background Task
-Periodically syncs database container_instances status with actual Docker container state.
-Handles:
-- Containers marked 'stopped' in DB but still running in Docker -> stop them
-- Containers marked 'running'/'starting' in DB but missing in Docker -> mark as 'stopped'
-- Expired containers that should be cleaned up
+Reconcile recorded challenge instances with the Docker daemon.
 """
 
 import logging
 import time
-from datetime import datetime
-from sqlalchemy.orm import joinedload
+from datetime import datetime, timedelta, timezone
+
 from models import db
-from models.container import ContainerInstance, ContainerEvent
+from models.container import ContainerInstance
 from services.container_manager import container_orchestrator
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
 
 logger = logging.getLogger(__name__)
 
 
-def reconcile_containers(app):
-    """
-    Reconcile DB container instances with actual Docker containers.
-    Run this in a background thread/scheduler.
-    """
+def reconcile_containers(app, *, expired_only=False):
     with app.app_context():
         try:
-            # Get Docker client
-            container_orchestrator._ensure_docker_client()
-            if not container_orchestrator.docker_client:
-                logger.warning("Docker client not available for reconciliation")
-                return
-            
-            # Get all active containers from database
-            try:
-                db_containers = ContainerInstance.query.filter(
-                    ContainerInstance.status.in_(['starting', 'running', 'stopping'])
-                ).all()
-            except OperationalError as oe:
-                # Possibly missing column (e.g., dynamic_flag) - attempt to add it and retry
-                logger.warning(f"OperationalError when querying containers: {oe}; attempting to add missing column and retry")
-                try:
-                    with db.engine.connect() as conn:
-                        conn.execute(text("ALTER TABLE container_instances ADD COLUMN IF NOT EXISTS dynamic_flag VARCHAR(512) DEFAULT NULL;"))
-                        conn.commit()
-                    db_containers = ContainerInstance.query.filter(
-                        ContainerInstance.status.in_(['starting', 'running', 'stopping'])
-                    ).all()
-                except Exception as e:
-                    logger.error(f"Failed to add dynamic_flag column or retry query: {e}")
-                    return
-            
-            # Get all running containers from Docker
-            docker_containers = {}
-            try:
-                all_docker_containers = container_orchestrator.docker_client.containers.list(
-                    all=True, 
-                    filters={'name': 'ctf-challenge'}
-                )
-                for dc in all_docker_containers:
-                    docker_containers[dc.id] = dc
-            except Exception as e:
-                logger.error(f"Failed to list Docker containers: {e}")
-                return
-            
-            reconciled_count = 0
-            stopped_count = 0
-            marked_stopped_count = 0
-            
-            for db_container in db_containers:
-                try:
-                    # Check if container exists in Docker
-                    docker_container = docker_containers.get(db_container.container_id)
-                    
-                    if not docker_container:
-                        # Container missing in Docker but marked active in DB
-                        if db_container.status in ['starting', 'running']:
-                            logger.info(f"Container {db_container.container_name} missing in Docker, marking as stopped")
-                            db_container.status = 'stopped'
-                            db_container.error_message = 'Container not found in Docker'
-                            marked_stopped_count += 1
-                        continue
-                    
-                    # Container exists - check consistency
-                    docker_status = docker_container.status  # 'running', 'exited', 'created', etc.
-                    
-                    # If DB says stopped but Docker is running, stop it
-                    if db_container.status == 'stopped' and docker_status == 'running':
-                        logger.info(f"Stopping Docker container {db_container.container_name} (marked stopped in DB)")
-                        try:
-                            docker_container.stop(timeout=10)
-                            docker_container.remove(force=True)
-                            stopped_count += 1
-                        except Exception as e:
-                            logger.error(f"Failed to stop container {db_container.container_name}: {e}")
-                    
-                    # If Docker is exited but DB says running, update DB
-                    elif db_container.status in ['starting', 'running'] and docker_status in ['exited', 'dead']:
-                        logger.info(f"Container {db_container.container_name} has exited, marking as stopped")
-                        db_container.status = 'stopped'
-                        db_container.error_message = f'Container exited with status: {docker_status}'
-                        marked_stopped_count += 1
-                    
-                    # Check if expired
-                    if db_container.expires_at and datetime.utcnow() > db_container.expires_at:
-                        if db_container.status in ['starting', 'running']:
-                            logger.info(f"Container {db_container.container_name} has expired, stopping")
-                            try:
-                                if docker_status == 'running':
-                                    docker_container.stop(timeout=10)
-                                docker_container.remove(force=True)
-                                stopped_count += 1
-                            except Exception as e:
-                                logger.error(f"Failed to stop expired container: {e}")
-                            
-                            db_container.status = 'stopped'
-                            db_container.error_message = 'Container expired'
-                            marked_stopped_count += 1
-                    
-                    reconciled_count += 1
-                    
-                except Exception as e:
-                    logger.error(f"Error reconciling container {db_container.id}: {e}")
-                    continue
-            
-            # Commit all changes
-            db.session.commit()
-            
-            if reconciled_count > 0 or stopped_count > 0 or marked_stopped_count > 0:
-                logger.info(
-                    f"Reconciliation complete: {reconciled_count} checked, "
-                    f"{stopped_count} stopped in Docker, {marked_stopped_count} marked stopped in DB"
-                )
-        
-        except Exception as e:
-            logger.error(f"Container reconciliation failed: {e}")
-            db.session.rollback()
-        finally:
-            db.session.remove()
+            with container_orchestrator.lifecycle_transaction() as settings:
+                interval = settings.cleanup_interval_minutes
+                if expired_only and not settings.auto_cleanup_expired:
+                    return interval
+
+                container_orchestrator._ensure_docker_client()
+                client = container_orchestrator.docker_client
+                if client is None:
+                    return interval
+
+                containers = client.containers.list(all=True, filters={'name': 'ctf-challenge'})
+                by_id = {container.id: container for container in containers}
+                by_name = {container.name: container for container in containers}
+                instances = ContainerInstance.query.filter(db.or_(
+                    ContainerInstance.status.in_(ContainerInstance.ACTIVE_STATUSES),
+                    ContainerInstance.container_name.in_(by_name),
+                )).with_for_update().all()
+                for instance in instances:
+                    container = by_id.get(instance.container_id) or by_name.get(instance.container_name)
+                    _reconcile_instance(instance, container, settings, expired_only)
+
+                if not expired_only and settings.cleanup_stale_containers:
+                    tracked_names = {instance.container_name for instance in instances}
+                    _remove_stale_orphans(containers, tracked_names, settings.stale_container_hours)
+                return interval
+        except Exception:
+            logger.exception('Container reconciliation failed')
+            return None
+
+
+def _reconcile_instance(instance, container, settings, expired_only):
+    expired = instance.is_active() and instance.is_expired() and settings.auto_cleanup_expired
+    if expired:
+        reason = 'Container expired'
+    elif expired_only:
+        return
+    elif instance.status == 'stopping':
+        reason = 'Completed pending container removal'
+    elif instance.is_active() and container is None:
+        reason = 'Container not found in Docker'
+    elif instance.is_active() and container.status in ('exited', 'dead', 'created'):
+        reason = f'Container has Docker status {container.status}'
+    elif not instance.is_active() and container is not None and settings.cleanup_stale_containers:
+        reason = 'Removed container for inactive instance'
+    else:
+        return
+
+    if container is not None:
+        try:
+            container_orchestrator._remove_docker_container(container.id, container)
+        except Exception:
+            logger.exception('Failed to reconcile challenge container %s', instance.container_name)
+            return
+    if instance.is_active():
+        instance.status = 'stopped'
+        instance.error_message = reason
+    container_orchestrator._log_event(
+        instance, instance.status, reason, 'expire' if expired else 'reconcile',
+    )
+
+
+def _remove_stale_orphans(containers, tracked_names, stale_hours):
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_hours or 0)
+    for container in containers:
+        if container.name in tracked_names or not container.labels.get('ctf.session_id'):
+            continue
+        created = container.attrs.get('Created')
+        if not created:
+            continue
+        try:
+            if datetime.fromisoformat(created.replace('Z', '+00:00')) > cutoff:
+                continue
+        except (TypeError, ValueError):
+            continue
+        try:
+            container_orchestrator._remove_docker_container(container.id, container)
+        except Exception:
+            logger.exception('Failed to remove orphan challenge container %s', container.name)
 
 
 def run_reconciliation_loop(app, interval_seconds=60):
-    """
-    Run reconciliation in a loop (for background thread).
-    
-    Args:
-        app: Flask app instance
-        interval_seconds: Seconds between reconciliation runs (default: 60)
-    """
-    logger.info(f"Starting container reconciliation loop (interval: {interval_seconds}s)")
-    
     while True:
-        try:
-            reconcile_containers(app)
-        except Exception as e:
-            logger.error(f"Reconciliation loop error: {e}")
-        
-        time.sleep(interval_seconds)
+        interval_minutes = reconcile_containers(app)
+        time.sleep(interval_minutes * 60 if interval_minutes and interval_minutes > 0 else interval_seconds)
