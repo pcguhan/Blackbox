@@ -102,7 +102,7 @@
                             <button class="nav-link dropdown-toggle site-nav-control account-control" type="button" id="userDropdown"
                                     aria-controls="userMenu" aria-expanded="false" data-bs-toggle="dropdown">
                                 <i class="bi bi-person-circle" aria-hidden="true"></i>
-                                <span class="account-name">{{ current_user.username }}</span>
+                                <span class="account-name">{{ current_user.full_name if current_user.auth_provider == 'google' and current_user.full_name else current_user.username }}</span>
                             </button>
                             <ul id="userMenu" class="dropdown-menu dropdown-menu-end account-menu" aria-labelledby="userDropdown">
                                 <li><a class="dropdown-item" href="{{ url_for('auth.profile') }}"><i class="bi bi-person" aria-hidden="true"></i> Profile</a></li>

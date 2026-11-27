@@ -8,6 +8,8 @@ Flask-Migrate==4.0.5
 PyMySQL==1.1.0
 SQLAlchemy>=2.0.41
 cryptography==41.0.3
+google-auth>=2.63,<3
+requests>=2.32,<3
 redis==5.0.0
 flask-caching==2.0.2
 python-socketio==5.9.0

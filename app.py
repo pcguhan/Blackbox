@@ -84,6 +84,8 @@ def create_app(config_name=None):
     
     # Register blueprints
     from routes.auth import auth_bp
+    from routes.auth_admin import auth_admin_bp
+    from routes.auth_google import auth_google_bp
     from routes.challenges import challenges_bp
     from routes.teams import teams_bp
     from routes.scoreboard import scoreboard_bp
@@ -98,6 +100,8 @@ def create_app(config_name=None):
     
     app.register_blueprint(setup_bp)
     app.register_blueprint(auth_bp)
+    app.register_blueprint(auth_admin_bp)
+    app.register_blueprint(auth_google_bp)
     app.register_blueprint(challenges_bp)
     app.register_blueprint(teams_bp)
     app.register_blueprint(scoreboard_bp)
@@ -355,6 +359,11 @@ if not app.testing:
 
         from scripts.schema_scoring import ensure_scoring_schema
         ensure_scoring_schema()
+        try:
+            from scripts.schema_auth import ensure_auth_schema
+            ensure_auth_schema()
+        except Exception as e:
+            app.logger.warning(f"Could not ensure authentication DB schema on startup: {e}")
 
     # Initialize container reconciliation background task
     try:

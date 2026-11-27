@@ -1,15 +1,43 @@
-from flask import Blueprint, render_template, redirect, url_for, flash, request
+from flask import Blueprint, render_template, redirect, url_for, flash, jsonify, request, session
 from flask_login import login_user, logout_user, login_required, current_user
 from models import db
 from models.user import User
 from datetime import datetime
 from utils.audit import log_audit_event
+from utils.identity import local_next
 import re
 from utils.email import send_email, generate_confirmation_token, verify_token
 from flask import current_app
 from services.exclusive_access import BLOCKED_MESSAGE, DEACTIVATED_MESSAGE, enforce_for_user, is_email_allowed
+from services.auth_policy import (
+    GOOGLE_ONLY_MESSAGE, NO_LOCAL_PASSWORD, SESSION_PROVIDER, google_available, google_only, local_session_blocked,
+)
 
 auth_bp = Blueprint('auth', __name__)
+
+
+@auth_bp.before_app_request
+def enforce_google_only():
+    if request.endpoint in {'static', 'health_check'}:
+        return
+    if current_user.is_authenticated and local_session_blocked(current_user):
+        logout_user()
+        session.pop(SESSION_PROVIDER, None)
+        flash(GOOGLE_ONLY_MESSAGE, 'error')
+        if request.path.startswith('/api/') or request.is_json:
+            return jsonify(success=False, message=GOOGLE_ONLY_MESSAGE), 403
+        return redirect(url_for('auth.login'))
+
+
+def _google_only_redirect():
+    flash(GOOGLE_ONLY_MESSAGE, 'error')
+    return redirect(url_for('auth.login'))
+
+
+def _login_page(unverified_email=None):
+    return render_template('login.html', google_enabled=google_available(), google_only=google_only(),
+                           next_page=local_next(request.args.get('next')), unverified_email=unverified_email)
+
 
 @auth_bp.route('/login', methods=['GET', 'POST'])
 def login():
@@ -24,31 +52,35 @@ def login():
         
         if not username or not password:
             flash('Please fill in all fields', 'error')
-            return render_template('login.html')
+            return _login_page()
         
         user = User.query.filter_by(username=username).first()
         
-        if user and user.check_password(password):
+        if user and user.password_hash != NO_LOCAL_PASSWORD and user.check_password(password):
+            if google_only() and not user.is_admin:
+                flash(GOOGLE_ONLY_MESSAGE, 'error')
+                return _login_page()
             if not enforce_for_user(user):
                 flash(BLOCKED_MESSAGE if user.is_active else DEACTIVATED_MESSAGE, 'error')
-                return render_template('login.html')
+                return _login_page()
                 
             from models.settings import Settings
             require_verification = Settings.get('require_email_verification', True)
             
             if require_verification and not getattr(user, 'is_verified', True):
                 flash('Please verify your email address before logging in. Check your inbox.', 'error')
-                return render_template('login.html', unverified_email=user.email)
+                return _login_page(unverified_email=user.email)
             
             login_user(user, remember=remember)
+            session[SESSION_PROVIDER] = 'local'
             user.last_login = datetime.utcnow()
             user.last_ip_address = request.remote_addr
             db.session.commit()
             
             log_audit_event(user_id=user.id, team_id=user.team_id, action='LOGIN_SUCCESS')
             
-            next_page = request.args.get('next')
-            if next_page and next_page.startswith('/') and not next_page.startswith('//') and '\\' not in next_page:
+            next_page = local_next(request.args.get('next'))
+            if next_page:
                 return redirect(next_page)
             
             # Redirect based on admin status
@@ -60,12 +92,14 @@ def login():
             log_audit_event(action='LOGIN_FAILED', details={'username': username})
             flash('Invalid username or password', 'error')
     
-    return render_template('login.html')
+    return _login_page()
 
 
 @auth_bp.route('/register', methods=['GET', 'POST'])
 def register():
     """Registration page and handler"""
+    if google_only():
+        return _google_only_redirect()
     if current_user.is_authenticated:
         return redirect(url_for('index'))
     
@@ -185,6 +219,7 @@ def logout():
     _user_id = current_user.id
     _team_id = current_user.team_id
     logout_user()
+    session.pop(SESSION_PROVIDER, None)
     log_audit_event(user_id=_user_id, team_id=_team_id, action='LOGOUT')
     flash('You have been logged out', 'info')
     return redirect(url_for('index'))
@@ -226,6 +261,8 @@ def verify_email(token):
 
 @auth_bp.route('/resend-verification', methods=['POST'])
 def resend_verification():
+    if google_only():
+        return _google_only_redirect()
     email = request.form.get('email')
     user = User.query.filter_by(email=email).first()
     if user and not getattr(user, 'is_verified', True):
@@ -251,13 +288,15 @@ def resend_verification():
 
 @auth_bp.route('/forgot-password', methods=['GET', 'POST'])
 def forgot_password():
+    if google_only():
+        return _google_only_redirect()
     if current_user.is_authenticated:
         return redirect(url_for('index'))
         
     if request.method == 'POST':
         email = request.form.get('email')
         user = User.query.filter_by(email=email).first()
-        if user:
+        if user and user.password_hash != NO_LOCAL_PASSWORD:
             token = generate_confirmation_token(user.email)
             from models.settings import Settings
             base_url = Settings.get('base_url', '')
@@ -280,6 +319,8 @@ def forgot_password():
 
 @auth_bp.route('/reset-password/<token>', methods=['GET', 'POST'])
 def reset_password(token):
+    if google_only():
+        return _google_only_redirect()
     if current_user.is_authenticated:
         return redirect(url_for('index'))
         
@@ -288,6 +329,11 @@ def reset_password(token):
         flash('The password reset link is invalid or has expired.', 'error')
         return redirect(url_for('auth.login'))
         
+    user = User.query.filter_by(email=email).first()
+    if user and user.password_hash == NO_LOCAL_PASSWORD:
+        flash('This account signs in with Google.', 'info')
+        return redirect(url_for('auth.login'))
+
     if request.method == 'POST':
         password = request.form.get('password')
         confirm_password = request.form.get('confirm_password')
@@ -300,7 +346,6 @@ def reset_password(token):
             flash('Password must be at least 6 characters long', 'error')
             return render_template('reset_password.html', token=token)
             
-        user = User.query.filter_by(email=email).first()
         if user:
             user.set_password(password)
             db.session.commit()
