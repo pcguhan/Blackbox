@@ -1,19 +1,41 @@
 # BlackBox CTF Platform
 
-## Test the updated UI locally
+## What's new (November 2026)
 
-The files in this checkout include five colour themes (Default, Graphite, Forest, Copper and Paper), managed in the existing admin background-theme settings, and a translucent CYSCOM leaderboard for signed-in participants. Admins retain the existing scoreboard visibility switch. Source repository: [guhan (DaBot) / pcguhan](https://github.com/pcguhan/Blackbox).
+This release ports the useful parts of the VIT CTF rewrite into BlackBox while keeping teams, local accounts, the CYSCOM identity, the image background and every existing theme.
+
+- **Team-ranked leaderboard** with live updates, first bloods, freeze/unfreeze and member nicknames in team details. Concurrent correct submissions from one team are awarded once.
+- **Google sign-in** for verified `@vitstudent.ac.in` accounts with roll-number names, an admin **Google-only** toggle enforced on the server, and the existing SMTP-backed local registration, verification and password reset when the toggle is off. Administrators can always sign in locally.
+- **Exclusive Access**: an optional CSV/XLSX email allowlist for both sign-in methods.
+- **Themes**: Navy/Blue and Neon join Default, Graphite, Forest, Copper and Paper, plus a font option.
+- **Flags** default to `CYS{...}` (configurable); existing flags are unchanged.
+- **Docker**: an admin upload wizard with safe archive extraction, per-instance HMAC flags, resource and instance limits, restart cooldown and `CHALLENGE_HOST`.
+- **Security**: one visibility rule for every participant endpoint, CSRF on every state-changing request, `no-store` for signed-in pages, private backups and re-encoded image uploads.
+- **Redesigned participant pages** (challenges, detail, profile, `/guide`, landing) and **admin console** (filters, CSV exports, separate event/scoring saves).
+
+Documentation:
+
+- [Participant guide](docs/participant-guide.md)
+- [Administrator guide](docs/admin-guide.md)
+- [Operations guide](docs/operations.md) (deployment, Google OAuth, SMTP, upgrades, rollback)
+- [Scoring and security semantics](docs/scoring-and-security.md)
+- [Backups](docs/backups.md)
+- [Code map](docs/code-map.md)
+- [Verification notes](docs/verification-2026-11.md)
+
+Upgrading? Read [operations.md](docs/operations.md#upgrading-an-existing-installation) first. All schema changes are additive; do **not** run individual-only schema or reset scripts from the source project.
+
+## Test the UI locally
 
 A disposable preview runs without MySQL, Redis or Docker:
 
 ```powershell
-# A local virtual environment has already been prepared for this checkout.
 .\.venv\Scripts\python.exe scripts\preview_ui.py
 ```
 
 Open **http://127.0.0.1:5050**. Sign in as `preview-admin` or `preview-player` with password `PreviewOnly123!`. Sample data resets when the preview restarts. It does not use your configured production database.
 
-For a fresh environment, create `.venv` and install `requirements-dev.txt`. Run `python -m unittest tests.test_ui -v` for the integration checks. [UI verification notes](docs/ui-requirements.md) describe the test commands. Runtime Python dependencies are in `requirements.txt`; `requirements-win.txt` includes that same manifest, and optional test tools are in `requirements-dev.txt`. Email, Docker provisioning and production backups require the corresponding configured services.
+For a fresh environment, create `.venv` and install `requirements-dev.txt`, then run the full suite with `python -m unittest discover -s tests -t .`. Runtime Python dependencies are in `requirements.txt`; `requirements-win.txt` includes that same manifest, and optional test tools are in `requirements-dev.txt`. Email, Google sign-in, Docker provisioning and production backups require the corresponding configured services.
 
 
 <div align="center">
@@ -80,7 +102,8 @@ A modern, feature-rich Capture The Flag (CTF) platform built with Flask, designe
 
 ![Teams](images/image4.png)
 
-- **Team Scoring**: Aggregate team scores with solve tracking
+- **Team Scoring**: The leaderboard ranks teams; each challenge is awarded once per team, even for simultaneous submissions
+- **Member Names**: Team details show each member's nickname (local accounts) or name and roll number (Google accounts)
 - **Team Profiles**: View team members, solves, and statistics
 
 #### User Management & Authentication
@@ -90,6 +113,9 @@ A modern, feature-rich Capture The Flag (CTF) platform built with Flask, designe
 - **User Profiles**: Detailed solve history, unlocked hints, and team membership stats
 - **Admin Roles**: Dedicated admin panel with complete platform controls
 - **Password Security**: Bcrypt password hashing
+- **Google Sign-In**: Verified `@vitstudent.ac.in` Google accounts, with names and roll numbers taken from the Google profile; an admin toggle can make participation Google-only (administrators keep local login for recovery)
+- **Exclusive Access**: Optional uploaded email allowlist that applies to both sign-in methods
+- **Profile Settings**: Optional nickname and a re-encoded profile picture
 
 ![Teams](images/image7.png)
 
