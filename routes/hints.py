@@ -1,40 +1,35 @@
-from flask import Blueprint, request, jsonify, render_template
+from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
 from models import db
 from models.hint import Hint, HintUnlock
 from models.challenge import Challenge
-from models.user import User
-from models.team import Team
+from services.challenge_catalog import is_challenge_visible, participant_scope
 
 hints_bp = Blueprint('hints', __name__, url_prefix='/hints')
+
+
+def hint_unlock_allowed(hint):
+    prerequisite = hint.prerequisite_hint
+    if prerequisite and not prerequisite.unlocks.filter(participant_scope(HintUnlock, current_user)).first():
+        return False, f'You must unlock Hint #{prerequisite.order} first'
+    return True, None
 
 
 @hints_bp.route('/challenge/<int:challenge_id>', methods=['GET'])
 @login_required
 def get_challenge_hints(challenge_id):
     """Get hints for a challenge"""
-    challenge = Challenge.query.get_or_404(challenge_id)
+    challenge = db.session.get(Challenge, challenge_id)
 
-    # Get user's team (needed for unlock checks)
-    team = current_user.get_team()
-    team_id = team.id if team else None
-
-    # Only allow access if challenge is unlocked for this user/team or user is admin
-    if not current_user.is_admin:
-        if not challenge.is_unlocked_for_user(current_user.id, team_id):
-            return jsonify({'success': False, 'message': 'Challenge not found'}), 404
+    if not is_challenge_visible(challenge, current_user):
+        return jsonify(success=False, message='Challenge not found'), 404
 
     hints = Hint.query.filter_by(challenge_id=challenge_id).order_by(Hint.order).all()
     
     hints_data = []
     for hint in hints:
-        # Check if unlocked
-        if team:
-            unlocked = hint.is_unlocked_by_team(team.id)
-            can_unlock, reason = hint.can_unlock(team_id=team.id)
-        else:
-            unlocked = hint.is_unlocked_by_user(current_user.id)
-            can_unlock, reason = hint.can_unlock(user_id=current_user.id)
+        unlocked = hint.unlocks.filter(participant_scope(HintUnlock, current_user)).first() is not None
+        can_unlock, reason = hint_unlock_allowed(hint)
         
         hint_data = {
             'id': hint.id,
@@ -60,39 +55,29 @@ def get_challenge_hints(challenge_id):
 @login_required
 def unlock_hint(hint_id):
     """Unlock a hint by paying the cost"""
-    hint = Hint.query.get_or_404(hint_id)
-    challenge = hint.challenge
+    hint = db.session.get(Hint, hint_id)
 
-    # Get user's team (needed for unlock checks)
+    if not hint or not is_challenge_visible(hint.challenge, current_user):
+        return jsonify(success=False, message='Challenge not found'), 404
+
+    challenge = hint.challenge
     team = current_user.get_team()
     team_id = team.id if team else None
 
-    # Only allow unlocking hints if the challenge is unlocked for this user/team or user is admin
-    if not current_user.is_admin:
-        if not challenge.is_unlocked_for_user(current_user.id, team_id):
-            return jsonify({'success': False, 'message': 'Challenge not found'}), 404
-    
     # TOCTOU FIX: Lock the Hint row to serialize concurrent unlock attempts.
     # Without this lock, two team members clicking "unlock" simultaneously can
     # both pass the already_unlocked check, creating duplicate HintUnlock records
     # and deducting points twice.
-    Hint.query.with_for_update().get(hint_id)
+    hint = Hint.query.filter_by(id=hint_id).with_for_update().first_or_404()
     
     # Check if already unlocked (now protected by the lock above)
-    if team:
-        # For teams, check if unlocked by team OR by user (if logic allows mixed)
-        # But strictly, we should check if the TEAM has unlocked it.
-        # Our updated is_unlocked_by_team handles the query logic.
-        already_unlocked = hint.is_unlocked_by_team(team_id)
-    else:
-        # For solo users, strictly check user_id
-        already_unlocked = hint.is_unlocked_by_user(current_user.id)
+    already_unlocked = hint.unlocks.filter(participant_scope(HintUnlock, current_user)).first() is not None
     
     if already_unlocked:
         return jsonify({'success': False, 'message': 'Hint already unlocked'}), 400
     
     # Check if prerequisites are met
-    can_unlock, reason = hint.can_unlock(user_id=current_user.id, team_id=team_id)
+    can_unlock, reason = hint_unlock_allowed(hint)
     if not can_unlock:
         return jsonify({'success': False, 'message': reason}), 400
     

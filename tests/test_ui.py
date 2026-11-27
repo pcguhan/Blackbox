@@ -133,6 +133,7 @@ class UIFlows(unittest.TestCase):
         from tempfile import TemporaryDirectory
         self.login(admin=True)
         response = self.client.post('/admin/settings/background-theme', data={
+            'csrf_token': self.token('/admin/settings'),
             'site_theme': 'forest',
             'custom_background_enabled': 'on',
             'custom_background_css': 'body { background-color: var(--canvas); }',
@@ -153,6 +154,7 @@ class UIFlows(unittest.TestCase):
             app.config['LOGO_UPLOAD_FOLDER'] = folder
             try:
                 response = self.client.post('/admin/settings/event-config', data={
+                    'csrf_token': self.token('/admin/settings'),
                     'ctf_name': 'Local event', 'scoreboard_visible': 'on',
                     'ctf_logo': (BytesIO(b'local-logo-content'), 'logo.png'),
                 }, content_type='multipart/form-data', follow_redirects=True)
@@ -167,7 +169,7 @@ class UIFlows(unittest.TestCase):
     def test_player_cannot_change_the_site_theme(self):
         self.login()
         response = self.client.post('/admin/settings/background-theme', data={'site_theme': 'paper'})
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 403)
         with app.app_context():
             self.assertEqual(Settings.get('site_theme', 'default'), 'default')
         self.assertNotIn('adminThemeSelect', self.client.get('/').text)

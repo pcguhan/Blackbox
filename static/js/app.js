@@ -5,7 +5,7 @@ function fetchWithCSRF(url, options = {}) {
     const headers = new Headers(options.headers || {});
     const method = (options.method || 'GET').toUpperCase();
     if (new URL(url, location.href).origin === location.origin && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-        headers.set('X-CSRF-Token', getCSRFToken());
+        headers.set('X-CSRFToken', getCSRFToken());
     }
     return fetch(url, { ...options, headers });
 }

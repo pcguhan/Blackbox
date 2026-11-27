@@ -12,6 +12,7 @@
                 </h2>
                 
                 <form method="POST" action="{{ url_for('auth.login', next=request.args.get('next')) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <div class="mb-3">
                         <label for="username" class="form-label">Username</label>
                         <input type="text" class="form-control" id="username" name="username" 
@@ -53,6 +54,7 @@
                 <div class="mt-4 p-3 border rounded text-center" style="background-color: var(--bs-tertiary-bg, rgba(128,128,128,0.1));">
                     <p class="small mb-2">Didn't receive the verification email?</p>
                     <form method="POST" action="{{ url_for('auth.resend_verification') }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <input type="hidden" name="email" value="{{ unverified_email }}">
                         <button type="submit" class="btn btn-sm btn-outline-secondary">
                             Resend Verification Email

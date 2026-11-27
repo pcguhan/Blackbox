@@ -1,8 +1,8 @@
 import gevent.monkey
 gevent.monkey.patch_all()
 
-from flask import Flask, render_template, send_from_directory, send_file, abort
-from flask_login import LoginManager
+from flask import Flask, render_template, send_from_directory, send_file, abort, flash, redirect, request, url_for
+from flask_login import LoginManager, current_user
 from flask.json.provider import DefaultJSONProvider
 from config import config
 from models import db
@@ -10,7 +10,7 @@ from models.user import User
 from services.cache import cache_service
 from services.websocket import WebSocketService, socketio
 from services.file_storage import file_storage
-from security_utils import init_security
+from security_utils import CSRFProtection, init_security
 import os
 from decimal import Decimal
 
@@ -69,6 +69,18 @@ def create_app(config_name=None):
     @login_manager.user_loader
     def load_user(user_id):
         return User.query.get(int(user_id))
+
+    @app.before_request
+    @CSRFProtection.csrf_protect()
+    def protect_admin_routes():
+        if request.path == '/admin' or request.path.startswith('/admin/'):
+            if not current_user.is_authenticated:
+                return login_manager.unauthorized()
+            if not current_user.is_admin:
+                if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+                    abort(403)
+                flash('Admin access required', 'error')
+                return redirect(url_for('index'))
     
     # Register blueprints
     from routes.auth import auth_bp
@@ -175,36 +187,28 @@ def create_app(config_name=None):
     def serve_file(filename):
         """Serve uploaded files with original filename"""
         from models.file import ChallengeFile
-        import os
-        from urllib.parse import quote
-        
-        upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
-        
-        normalized_path = filename.replace('/', os.sep)
-        file_record = ChallengeFile.query.filter_by(relative_path=normalized_path).first()
-        if not file_record: 
-            file_record = ChallengeFile.query.filter_by(relative_path=filename).first()
-        
-        file_path = os.path.realpath(os.path.join(upload_folder, normalized_path))
-        if not file_path.startswith(os.path.realpath(upload_folder) + os.sep):
-            abort(403)
-        
-        if not os.path.exists(file_path):
-            app.logger.warning(f"File not found: {file_path}")
+        from services.challenge_catalog import is_challenge_visible
+
+        if '\\' in filename or ':' in filename or any(part in ('', '.', '..') for part in filename.split('/')):
             abort(404)
-        
-        if file_record and file_record.original_filename:
-            download_filename = file_record.original_filename
-            app.logger.info(f"Found DB record: {download_filename}")
-        else:
-            download_filename = os.path.basename(file_path)
-            app.logger.warning(f"No DB record, using: {download_filename}")
-        
+
+        file_record = ChallengeFile.query.filter(
+            ChallengeFile.relative_path.in_((filename, filename.replace('/', '\\')))
+        ).first()
+        if not file_record or not is_challenge_visible(file_record.challenge, current_user):
+            abort(404)
+
+        upload_folder = os.path.realpath(app.config.get('UPLOAD_FOLDER', 'uploads'))
+        stored_path = file_record.relative_path.replace('\\', '/')
+        file_path = os.path.realpath(os.path.join(upload_folder, stored_path))
+        if not file_path.startswith(upload_folder + os.sep) or not os.path.isfile(file_path):
+            abort(404)
+
         return send_file(
             file_path,
             as_attachment=True,
-            download_name=download_filename,
-            mimetype=file_record.mime_type if file_record and file_record.mime_type else 'application/octet-stream'
+            download_name=file_record.original_filename,
+            mimetype=file_record.mime_type or 'application/octet-stream'
         )
     
     @app.route('/favicon.ico')

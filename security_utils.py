@@ -169,7 +169,7 @@ class CSRFProtection:
     @staticmethod
     def validate_csrf_token(token):
         """Validate CSRF token"""
-        if '_csrf_token' not in session:
+        if '_csrf_token' not in session or not isinstance(token, str) or not token.isascii():
             return False
         
         return secrets.compare_digest(session['_csrf_token'], token)
@@ -183,10 +183,12 @@ class CSRFProtection:
                 if request.method in ['GET', 'HEAD', 'OPTIONS']:
                     return f(*args, **kwargs)
                 
-                token = request.form.get('csrf_token') or request.headers.get('X-CSRF-Token')
+                token = (request.form.get('csrf_token') or request.headers.get('X-CSRFToken')
+                         or request.headers.get('X-CSRF-Token'))
                 
                 if not token or not CSRFProtection.validate_csrf_token(token):
-                    if request.is_json or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                    if (request.is_json or request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+                            or request.accept_mimetypes.best_match(('text/html', 'application/json')) == 'application/json'):
                         return jsonify({'success': False, 'message': 'CSRF token invalid'}), 403
                     else:
                         from flask import abort

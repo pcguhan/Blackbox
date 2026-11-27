@@ -8,6 +8,7 @@
     <div class="col-md-9">
         <h3>Send Notification</h3>
         <form method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="mb-3">
                 <label class="form-label">Title</label>
                 <input type="text" name="title" class="form-control" required>
@@ -70,7 +71,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const id = this.dataset.id;
             if (!id) return;
             if (!confirm('Delete this notification for all users?')) return;
-            fetchWithCSRF(`/api/notifications/${id}/delete`, { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').getAttribute('content') } })
+            fetchWithCSRF(`/api/notifications/${id}/delete`, { method: 'POST', credentials: 'same-origin' })
                 .then(res => res.json())
                 .then(data => {
                     if (data && data.success) {
