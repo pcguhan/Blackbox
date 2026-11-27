@@ -81,7 +81,7 @@ class Config:
     # File Upload
     UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads'))
     LOGO_UPLOAD_FOLDER = os.getenv('LOGO_UPLOAD_FOLDER', os.path.join(UPLOAD_FOLDER, 'logos'))
-    MAX_CONTENT_LENGTH = int(os.getenv('MAX_UPLOAD_SIZE', 50 * 1024 * 1024))  # 50MB default
+    MAX_CONTENT_LENGTH = int(os.getenv('MAX_UPLOAD_SIZE', 50 * 1024 * 1024))  # Keep in sync with nginx client_max_body_size.
     ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'zip', 
                          'tar', 'gz', 'bz2', '7z', 'rar', 'exe', 'bin', 
                          'pcap', 'pcapng', 'cap', 'py', 'c', 'cpp', 'java',

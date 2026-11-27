@@ -80,6 +80,7 @@ def create_app(config_name=None):
     from routes.setup import setup_bp
     from routes.hints import hints_bp
     from routes.container import container_bp
+    from routes.docker_upload import docker_upload_bp
     
     app.register_blueprint(setup_bp)
     app.register_blueprint(auth_bp)
@@ -90,6 +91,7 @@ def create_app(config_name=None):
     app.register_blueprint(notifications_bp)
     app.register_blueprint(hints_bp)
     app.register_blueprint(container_bp)
+    app.register_blueprint(docker_upload_bp)
     
     # Setup check middleware
     @app.before_request
@@ -168,6 +170,8 @@ def create_app(config_name=None):
         else:
             download_filename = os.path.basename(file_path)
             app.logger.warning(f"No DB record, using: {download_filename}")
+        if download_filename.rstrip(' .').casefold() == 'solution.md':
+            abort(404)
         
         return send_file(
             file_path,
