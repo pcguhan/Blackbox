@@ -94,6 +94,7 @@ def create_app(config_name=None):
     from routes.hints import hints_bp
     from routes.container import container_bp
     from routes.appearance_admin import appearance_admin_bp
+    from routes.docker_upload import docker_upload_bp
     
     app.register_blueprint(setup_bp)
     app.register_blueprint(auth_bp)
@@ -133,6 +134,7 @@ def create_app(config_name=None):
                 response.headers['Cache-Control'] = 'no-store'
         return response
     app.register_blueprint(appearance_admin_bp)
+    app.register_blueprint(docker_upload_bp)
     
     # Setup check middleware
     @app.before_request
@@ -202,6 +204,9 @@ def create_app(config_name=None):
         stored_path = file_record.relative_path.replace('\\', '/')
         file_path = os.path.realpath(os.path.join(upload_folder, stored_path))
         if not file_path.startswith(upload_folder + os.sep) or not os.path.isfile(file_path):
+            abort(404)
+
+        if (file_record.original_filename or '').rstrip(' .').casefold() == 'solution.md':
             abort(404)
 
         return send_file(

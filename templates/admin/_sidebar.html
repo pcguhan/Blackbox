@@ -40,6 +40,7 @@
         <a href="{{ url_for('admin.docker_status') }}" class="admin-nav-link {% if request.endpoint == 'admin.docker_status' %}active{% endif %}">
             <i class="bi bi-box-seam"></i> Docker Status
         </a>
+        <a href="{{ url_for('docker_upload.docker_upload') }}" class="admin-nav-link {% if request.blueprint == 'docker_upload' %}active{% endif %}"><i class="bi bi-upload"></i> Docker Upload</a>
         <a href="{{ url_for('admin.dynamic_flags_monitor') }}" class="admin-nav-link {% if request.endpoint == 'admin.dynamic_flags_monitor' %}active{% endif %}">
             <i class="bi bi-shield-lock"></i> Dynamic Flags
         </a>
