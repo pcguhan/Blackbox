@@ -1,22 +1,20 @@
-{% extends "base.html" %}
+{% extends "admin/_layout.html" %}
+{% from "admin/_macros.html" import page_heading %}
 
 {% block title %}Admin Dashboard - {{ ctf_name }}{% endblock %}
 
-{% block content %}
-<div class="row">
-    <div class="col-md-3">
-        {% include 'admin/_sidebar.html' %}
-    </div>
-    
-    <div class="col-md-9">
-        <h2 class="mb-4">
-            <i class="bi bi-speedometer2"></i> Dashboard
-        </h2>
+{% block admin_content %}
+        {% call page_heading('Dashboard', 'speedometer2') %}
+        <a href="{{ url_for('admin.create_challenge') }}" class="btn btn-primary">
+            <i class="bi bi-plus-lg" aria-hidden="true"></i> Create challenge
+        </a>
+        {% endcall %}
         
         <dl class="admin-metrics">
             <div><dt>Users</dt><dd>{{ stats.users }}</dd></div>
             <div><dt>Teams</dt><dd>{{ stats.teams }}</dd></div>
             <div><dt>Challenges</dt><dd>{{ stats.challenges }}</dd></div>
+            <div><dt>Submissions</dt><dd>{{ stats.submissions }}</dd></div>
             <div><dt>Solves</dt><dd>{{ stats.solves }}</dd></div>
         </dl>
 
@@ -42,9 +40,9 @@
                             {% for solve in recent_solves %}
                             <tr>
                                 <td>{{ solve.solved_at|format_datetime('%Y-%m-%d %H:%M') }}</td>
-                                <td>{{ solve.user.username }}</td>
+                                <td>{{ solve.user.username if solve.user else 'Unknown' }}</td>
                                 <td>{{ solve.team.name if solve.team else '-' }}</td>
-                                <td>{{ solve.challenge.name }}</td>
+                                <td>{{ solve.challenge.name if solve.challenge else 'Unknown' }}</td>
                                 <td><span class="badge bg-primary">{{ solve.points_earned }}</span></td>
                             </tr>
                             {% endfor %}
@@ -56,6 +54,5 @@
                 {% endif %}
             </div>
         </div>
-    </div>
-</div>
+
 {% endblock %}

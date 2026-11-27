@@ -226,7 +226,7 @@ class ScoringAdmin(unittest.TestCase):
             self.assertIsNone(cache_service.get_stats())
             self.assertEqual(self.me()['members'], [{'name': 'preview-player'}])
             emit.reset_mock()
-            self.assertEqual(self.settings().status_code, 302)
+            self.assertEqual(self.settings(scoreboard_frozen='false').status_code, 302)
             emit.assert_any_call('scoreboard_freeze', {'frozen': False},
                                  namespace='/live', to='scoreboard_authenticated')
             update = next(call for call in emit.call_args_list if call.args[0] == 'scoreboard_update')

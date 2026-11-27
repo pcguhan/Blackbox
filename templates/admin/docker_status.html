@@ -1,14 +1,8 @@
-{% extends "base.html" %}
+{% extends "admin/_layout.html" %}
 
 {% block title %}Docker Container Status - Admin - {{ ctf_name }}{% endblock %}
 
-{% block content %}
-<div class="row">
-    <div class="col-md-3">
-        {% include 'admin/_sidebar.html' %}
-    </div>
-    
-    <div class="col-md-9">
+{% block admin_content %}
         <div class="d-flex justify-content-between align-items-center mb-4">
             <h2>
                 <i class="bi bi-box-seam"></i> Active Docker Containers
@@ -88,8 +82,7 @@
             No active containers at the moment.
         </div>
         {% endif %}
-    </div>
-</div>
+
 
 <script>
 function sortTable(columnIndex) {

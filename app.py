@@ -96,6 +96,7 @@ def create_app(config_name=None):
     from routes.scoreboard import scoreboard_bp
     from routes.admin import admin_bp
     from routes.access_admin import access_admin_bp
+    from routes.adminui_exports import adminui_bp
     from routes.notifications import notifications_bp
     from routes.setup import setup_bp
     from routes.hints import hints_bp
@@ -113,6 +114,7 @@ def create_app(config_name=None):
     app.register_blueprint(scoreboard_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(access_admin_bp)
+    app.register_blueprint(adminui_bp)
     app.register_blueprint(notifications_bp)
     app.register_blueprint(hints_bp)
     app.register_blueprint(container_bp)
@@ -248,11 +250,15 @@ def create_app(config_name=None):
     
     @app.errorhandler(404)
     def not_found(error):
+        if request.path == '/admin' or request.path.startswith('/admin/'):
+            return render_template('admin/_error.html', status=404), 404
         return render_template('errors/404.html'), 404
     
     @app.errorhandler(500)
     def internal_error(error):
         db.session.rollback()
+        if request.path == '/admin' or request.path.startswith('/admin/'):
+            return render_template('admin/_error.html', status=500), 500
         return render_template('errors/500.html'), 500
     
     @app.route('/health')

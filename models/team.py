@@ -55,6 +55,15 @@ class Team(db.Model):
         from models.user import User
         return User.query.filter_by(team_id=self.id).all()
     
+    @property
+    def captain(self):
+        from models.user import User
+        return db.session.get(User, self.captain_id) if self.captain_id else None
+
+    @property
+    def member_count(self):
+        return self.get_member_count()
+
     def get_member_count(self):
         """Get number of team members"""
         return self.members.count()

@@ -1,0 +1,193 @@
+.admin-workspace {
+    display: grid;
+    grid-template-columns: 13.5rem minmax(0, 1fr);
+    align-items: start;
+    gap: clamp(1rem, 2.5vw, 2rem);
+}
+
+.admin-rail {
+    position: sticky;
+    top: 1rem;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+}
+
+.admin-workspace .admin-sidebar {
+    border-top: 3px solid var(--accent);
+    background: rgba(var(--panel-rgb), .97) !important;
+}
+
+.admin-sidebar-title {
+    color: var(--ink);
+    font-size: 1rem;
+    font-weight: 650;
+    margin: 0 0 1rem;
+}
+
+.admin-nav-group + .admin-nav-group {
+    margin-top: .875rem;
+    padding-top: .875rem;
+    border-top: 1px solid var(--line);
+}
+
+.admin-nav-group > p {
+    margin: 0 0 .25rem .5rem;
+    color: var(--muted);
+    font-size: .72rem;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+}
+
+.admin-nav-link i {
+    width: 1.125rem;
+    flex: 0 0 1.125rem;
+    text-align: center;
+}
+
+.admin-workspace-content {
+    min-width: 0;
+}
+
+.admin-page-heading,
+.admin-workspace-content > h2,
+.admin-workspace-content > .d-flex:first-child {
+    background: rgba(var(--panel-rgb), .95);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    padding: clamp(.85rem, 2vw, 1.4rem);
+    margin: 0 0 1.25rem;
+}
+
+.admin-page-heading,
+.admin-page-title,
+.admin-heading-actions {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+}
+
+.admin-page-heading {
+    justify-content: space-between;
+    flex-wrap: wrap;
+}
+
+.admin-heading-actions {
+    flex-wrap: wrap;
+    color: var(--muted);
+}
+
+.admin-page-title i {
+    color: var(--accent);
+    font-size: 1.2rem;
+}
+
+.admin-page-title h1 {
+    margin: 0;
+    font-size: clamp(1.25rem, 2.4vw, 1.75rem);
+    letter-spacing: -.025em;
+}
+
+.admin-workspace .card {
+    border-color: var(--line);
+}
+
+.admin-workspace .card-header {
+    background: var(--raised);
+}
+
+.admin-workspace .table thead {
+    background: var(--raised);
+}
+
+.admin-workspace .table thead th {
+    padding-block: .75rem;
+}
+
+.admin-workspace .table-responsive {
+    background: var(--surface);
+}
+
+.admin-filter-panel {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
+    align-items: end;
+    gap: .85rem;
+    padding: 1rem;
+    margin-bottom: 1.25rem;
+    background: rgba(var(--panel-rgb), .97);
+    border: 1px solid var(--line);
+}
+
+.admin-filter-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
+}
+
+.admin-page .admin-role-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: .3rem;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+}
+
+.admin-role-badge.is-admin {
+    color: var(--secondary);
+    background: color-mix(in srgb, var(--secondary) 11%, var(--surface));
+}
+
+.admin-role-badge.is-player {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 11%, var(--surface));
+}
+
+.admin-workspace .admin-metrics {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
+}
+
+.admin-workspace .admin-metrics > div {
+    background: rgba(var(--panel-rgb), .97);
+    border-top: 2px solid var(--accent);
+}
+
+.admin-challenge-form > .card {
+    border-color: var(--line);
+}
+
+.admin-flag-value {
+    min-width: 10rem;
+}
+
+.admin-error {
+    max-width: 38rem;
+    margin: clamp(1rem, 8vw, 5rem) auto;
+    padding: clamp(1.5rem, 6vw, 3.25rem);
+    border: 1px solid var(--line);
+    border-top: 3px solid var(--accent);
+    background: rgba(var(--panel-rgb), .97);
+}
+
+.admin-error-code {
+    color: var(--accent);
+    font: 700 clamp(2.5rem, 8vw, 4rem)/1 var(--bs-font-monospace);
+}
+
+.admin-error h1 {
+    margin-top: 1rem;
+    font-size: clamp(1.5rem, 5vw, 2.25rem);
+}
+
+.admin-error p {
+    color: var(--muted);
+    margin-bottom: 1.5rem;
+}
+
+@media (max-width: 991px) {
+    .admin-workspace { grid-template-columns: minmax(0, 1fr); }
+    .admin-rail { position: static; max-height: none; }
+    .admin-workspace .admin-sidebar nav { display: flex; flex-wrap: wrap; gap: 1rem; }
+    .admin-workspace .admin-sidebar .admin-nav-group { flex: 1 1 10rem; margin: 0; padding: 0; border: 0; }
+}

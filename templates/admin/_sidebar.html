@@ -1,55 +1,44 @@
-<!-- Admin Sidebar Component -->
-<div class="admin-sidebar p-3">
-    <h5 class="mb-3">Admin Menu</h5>
-    <nav class="nav flex-column">
-        <a href="{{ url_for('admin.dashboard') }}" class="admin-nav-link {% if request.endpoint == 'admin.dashboard' %}active{% endif %}">
-            <i class="bi bi-speedometer2"></i> Dashboard
-        </a>
-        <a href="{{ url_for('admin.manage_challenges') }}" class="admin-nav-link {% if request.endpoint in ['admin.manage_challenges', 'admin.create_challenge', 'admin.edit_challenge'] %}active{% endif %}">
-            <i class="bi bi-puzzle"></i> Challenges
-        </a>
-        <a href="{{ url_for('admin.manage_branching') }}" class="admin-nav-link {% if request.endpoint == 'admin.manage_branching' %}active{% endif %}">
-            <i class="bi bi-diagram-3"></i> 
-            {% if settings.get('act_system_enabled', False) %}
-                Story & Branching
-            {% else %}
-                Challenge Configs
-            {% endif %}
-        </a>
-        <a href="{{ url_for('admin.manage_users') }}" class="admin-nav-link {% if request.endpoint == 'admin.manage_users' %}active{% endif %}">
-            <i class="bi bi-people"></i> Users
-        </a>
-        <a href="{{ url_for('admin.manage_teams') }}" class="admin-nav-link {% if request.endpoint == 'admin.manage_teams' %}active{% endif %}">
-            <i class="bi bi-people-fill"></i> Teams
-        </a>
-        <a href="{{ url_for('admin.manage_notifications') }}" class="admin-nav-link {% if request.endpoint == 'admin.manage_notifications' %}active{% endif %}">
-            <i class="bi bi-bell"></i> Notifications
-        </a>
-        <a href="{{ url_for('admin.flag_abuse') }}" class="admin-nav-link {% if request.endpoint == 'admin.flag_abuse' %}active{% endif %}">
-            <i class="bi bi-shield-exclamation"></i> Flag Sharing
-        </a>
-        <a href="{{ url_for('admin.hint_logs') }}" class="admin-nav-link {% if request.endpoint == 'admin.hint_logs' %}active{% endif %}">
-            <i class="bi bi-journal-text"></i> Hint Logs
-        </a>
-        <a href="{{ url_for('admin.backups') }}" class="admin-nav-link {% if request.endpoint == 'admin.backups' %}active{% endif %}">
-            <i class="bi bi-cloud-arrow-down"></i> Backups
-        </a>
-        <a href="{{ url_for('admin.docker_settings') }}" class="admin-nav-link {% if request.endpoint == 'admin.docker_settings' %}active{% endif %}">
-            <i class="bi bi-box"></i> Docker Config
-        </a>
-        <a href="{{ url_for('admin.docker_status') }}" class="admin-nav-link {% if request.endpoint == 'admin.docker_status' %}active{% endif %}">
-            <i class="bi bi-box-seam"></i> Docker Status
-        </a>
-        <a href="{{ url_for('docker_upload.docker_upload') }}" class="admin-nav-link {% if request.blueprint == 'docker_upload' %}active{% endif %}"><i class="bi bi-upload"></i> Docker Upload</a>
-        <a href="{{ url_for('admin.dynamic_flags_monitor') }}" class="admin-nav-link {% if request.endpoint == 'admin.dynamic_flags_monitor' %}active{% endif %}">
-            <i class="bi bi-shield-lock"></i> Dynamic Flags
-        </a>
-        <a href="{{ url_for('admin.ctf_control') }}" class="admin-nav-link {% if request.endpoint == 'admin.ctf_control' %}active{% endif %}">
-            <i class="bi bi-clock-history"></i> CTF Control
-        </a>
-        <a href="{{ url_for('admin.settings') }}" class="admin-nav-link {% if request.endpoint == 'admin.settings' %}active{% endif %}">
-            <i class="bi bi-gear"></i> Settings
-        </a>
+{% set groups = [
+    ('Overview', [
+        ('admin.dashboard', 'Dashboard', 'speedometer2', []),
+        ('admin.ctf_control', 'CTF Control', 'clock-history', []),
+        ('admin.settings', 'Settings', 'gear', [])
+    ]),
+    ('Competition', [
+        ('admin.manage_challenges', 'Challenges', 'puzzle', ['admin.create_challenge', 'admin.edit_challenge']),
+        ('admin.manage_branching', 'Story & Branching' if settings.get('act_system_enabled', False) else 'Branching', 'diagram-3', []),
+        ('admin.manage_users', 'Users', 'person', ['admin.user_activity']),
+        ('admin.manage_teams', 'Teams', 'people', []),
+        ('admin.manage_notifications', 'Notifications', 'bell', [])
+    ]),
+    ('Monitoring', [
+        ('admin.submissions', 'Submissions', 'list-check', []),
+        ('admin.hint_logs', 'Hint Logs', 'journal-text', []),
+        ('admin.flag_abuse', 'Flag Sharing', 'shield-exclamation', []),
+        ('admin.dynamic_flags_monitor', 'Dynamic Flags', 'flag', [])
+    ]),
+    ('Infrastructure', [
+        ('admin.docker_status', 'Docker Status', 'box-seam', []),
+        ('admin.docker_settings', 'Docker Config', 'box', []),
+        ('docker_upload.docker_upload', 'Docker Upload', 'upload', []),
+        ('admin.backups', 'Backups', 'cloud-arrow-down', [])
+    ])
+] %}
+<div class="admin-sidebar">
+    <p class="admin-sidebar-title">Admin console</p>
+    <nav aria-label="Admin navigation">
+        {% for label, links in groups %}
+        <div class="admin-nav-group">
+            <p>{{ label }}</p>
+            {% for endpoint, text, icon, children in links %}
+            {% set active = request.endpoint == endpoint or request.endpoint in children %}
+            <a href="{{ url_for(endpoint) }}" class="admin-nav-link{{ ' active' if active else '' }}"
+               {% if active %}aria-current="{{ 'page' if request.endpoint == endpoint else 'location' }}"{% endif %}>
+                <i class="bi bi-{{ icon }}" aria-hidden="true"></i> {{ text }}
+            </a>
+            {% endfor %}
+        </div>
+        {% endfor %}
     </nav>
-    {% include 'admin/partials/_versions.html' %}
 </div>
+{% include 'admin/partials/_versions.html' %}
