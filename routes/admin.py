@@ -11,10 +11,14 @@ from models.file import ChallengeFile
 from models.hint import Hint, HintUnlock
 from models.settings import Settings
 from services.cache import cache_service
+from services.backup_paths import (
+    archive_uploads, backup_dir, delete_backup_files, publish_backup_file, regular_file, valid_backup_name,
+)
 from services.file_storage import file_storage
 from services.scoring import ScoringService
 from services.standings import publish_standings, team_standings_enabled
 from utils.audit import log_audit_event
+from security_utils import CSRFProtection
 import json
 from models.notification import Notification
 from services.websocket import WebSocketService
@@ -1107,8 +1111,18 @@ def settings():
 def update_event_config():
     """Update event configuration (name, logo, description)"""
     from models.settings import Settings
-    import os
-    from werkzeug.utils import secure_filename
+    from pathlib import Path
+    from uuid import uuid4
+    from services.image_sanitizer import InvalidImage, sanitize_upload
+
+    logo_file = request.files.get('ctf_logo')
+    logo_data = None
+    if logo_file and logo_file.filename:
+        try:
+            logo_data, logo_extension = sanitize_upload(logo_file, max_bytes=8 * 1024 * 1024, max_side=1024)
+        except InvalidImage as error:
+            flash(str(error), 'error')
+            return redirect(url_for('admin.settings'))
     
     try:
         # Update CTF name
@@ -1158,32 +1172,13 @@ def update_event_config():
         publish_standings()
 
         # Handle logo upload
-        if 'ctf_logo' in request.files:
-            logo_file = request.files['ctf_logo']
-            if logo_file and logo_file.filename:
-                from flask import current_app
-                
-                # Use /var/uploads/logos (volume-mounted writable directory)
-                uploads_dir = current_app.config['LOGO_UPLOAD_FOLDER']
-                
-                # Create uploads directory if it doesn't exist
-                os.makedirs(uploads_dir, exist_ok=True)
-                
-                # Secure the filename
-                filename = secure_filename(logo_file.filename)
-                
-                # Add timestamp to avoid conflicts
-                from datetime import datetime
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                name, ext = os.path.splitext(filename)
-                filename = f'ctf_logo_{timestamp}{ext}'
-                
-                # Save the file
-                filepath = os.path.join(uploads_dir, filename)
-                logo_file.save(filepath)
-                
-                # Store relative path in settings
-                Settings.set('ctf_logo', filename, 'string', 'Path to CTF logo image')
+        if logo_data is not None:
+            uploads_dir = Path(current_app.config['LOGO_UPLOAD_FOLDER'])
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            filename = f'ctf_logo_{uuid4().hex}.{logo_extension}'
+            with (uploads_dir / filename).open('xb') as target:
+                target.write(logo_data)
+            Settings.set('ctf_logo', filename, 'string', 'Path to CTF logo image')
         
         flash('Event configuration updated successfully!', 'success')
     except Exception as e:
@@ -1874,48 +1869,38 @@ def backups():
 @login_required
 @admin_required
 def list_backups():
-    """List all available backups (stored in uploads directory)"""
-    import json
-    import os
-    from pathlib import Path
-    from datetime import datetime
-    
+    """List the available private database dumps."""
     try:
-        # Store backups in the uploads directory under 'backups' folder
-        backup_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        
+        directory = backup_dir()
         backups = []
-        
-        if backup_dir.exists():
-            for backup_file in sorted(backup_dir.glob('backup_*.sql.gz'), reverse=True):
-                backup_name = backup_file.stem.replace('.sql', '')  # Remove .sql from name
-                
-                # Try to read metadata if it exists
-                metadata_file = backup_file.with_suffix('.json')
-                if metadata_file.exists():
-                    try:
-                        with open(metadata_file, 'r') as f:
-                            metadata = json.load(f)
-                            backups.append(metadata)
-                    except json.JSONDecodeError:
-                        # Use file modification time as fallback, convert to ISO format
-                        timestamp = datetime.fromtimestamp(backup_file.stat().st_mtime).isoformat()
-                        backups.append({
-                            'backup_name': backup_name,
-                            'timestamp': timestamp,
-                            'size_mb': round(backup_file.stat().st_size / (1024 * 1024), 2)
-                        })
-                else:
-                    # Use file modification time as fallback, convert to ISO format
-                    timestamp = datetime.fromtimestamp(backup_file.stat().st_mtime).isoformat()
-                    backups.append({
-                        'backup_name': backup_name,
-                        'timestamp': timestamp,
-                        'size_mb': round(backup_file.stat().st_size / (1024 * 1024), 2)
-                    })
-        
-        return jsonify({'success': True, 'backups': backups})
+        for backup_file in sorted(directory.glob('backup_*.sql.gz'), reverse=True):
+            name = backup_file.name.removesuffix('.sql.gz')
+            if not valid_backup_name(name) or not regular_file(backup_file):
+                continue
+            try:
+                stat = backup_file.stat()
+            except FileNotFoundError:
+                continue
+            metadata = {
+                'timestamp': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                'size_mb': round(stat.st_size / (1024 * 1024), 2),
+            }
+            for suffix in ('.json', '.sql.json'):
+                sidecar = directory / f'{name}{suffix}'
+                if not regular_file(sidecar):
+                    continue
+                try:
+                    stored = json.loads(sidecar.read_text(encoding='utf-8'))
+                except (ValueError, OSError):
+                    continue
+                if isinstance(stored, dict):
+                    metadata.update(stored)
+                    break
+            metadata['backup_name'] = name
+            backups.append(metadata)
+        response = jsonify({'success': True, 'backups': backups})
+        response.cache_control.no_store = True
+        return response
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1924,6 +1909,7 @@ def list_backups():
 @admin_bp.route('/backups/api/create', methods=['POST'])
 @login_required
 @admin_required
+@CSRFProtection.csrf_protect()
 def create_backup():
     """Create a manual database backup"""
     import gzip
@@ -1936,22 +1922,19 @@ def create_backup():
         db_uri = current_app.config.get('SQLALCHEMY_DATABASE_URI')
         
         # Create backup directory
-        backup_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        directory = backup_dir()
         
         # Generate backup name
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         backup_name = f'backup_{timestamp}'
-        backup_file = backup_dir / f'{backup_name}.sql.gz'
+        backup_file = directory / f'{backup_name}.sql.gz'
         
         # Determine optional components requested (JSON body or form)
-        include_uploads = False
-        include_redis = False
-        try:
-            data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if isinstance(data, dict):
             include_uploads = bool(data.get('include_uploads'))
             include_redis = bool(data.get('include_redis'))
-        except Exception:
+        else:
             include_uploads = request.form.get('include_uploads') == 'on'
             include_redis = request.form.get('include_redis') == 'on'
 
@@ -1994,7 +1977,7 @@ def create_backup():
             
             if rows:
                 cursor.execute(f"DESCRIBE `{table}`")
-                columns = [col[0] for col in cursor.fetchall()]
+                columns = ', '.join(f'`{col[0]}`' for col in cursor.fetchall())
                 
                 for row in rows:
                     values = []
@@ -2010,14 +1993,14 @@ def create_backup():
                             escaped = str(value).replace("'", "''")
                             values.append(f"'{escaped}'")
                     
-                    sql_dump.append(f"INSERT INTO `{table}` VALUES ({', '.join(values)});")
+                    sql_dump.append(f"INSERT INTO `{table}` ({columns}) VALUES ({', '.join(values)});")
         
         sql_dump.append("SET FOREIGN_KEY_CHECKS=1;")
         
         conn.close()
         
         # Write compressed backup
-        with gzip.open(backup_file, 'wt', encoding='utf-8') as f:
+        with publish_backup_file(backup_file) as staged, gzip.open(staged, 'wt', encoding='utf-8') as f:
             f.write('\n'.join(sql_dump))
         
         # Prepare components metadata
@@ -2032,11 +2015,9 @@ def create_backup():
         if include_uploads:
             try:
                 uploads_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads'))
-                uploads_archive = backup_dir / f"{backup_name}_uploads.tar.gz"
+                uploads_archive = directory / f"{backup_name}_uploads.tar.gz"
                 if uploads_dir.exists():
-                    import tarfile
-                    with tarfile.open(uploads_archive, 'w:gz') as tar:
-                        tar.add(uploads_dir, arcname='uploads')
+                    archive_uploads(uploads_dir, uploads_archive)
                     components['uploads'] = True
                     sizes['uploads_mb'] = round(uploads_archive.stat().st_size / (1024 * 1024), 2)
             except Exception as e:
@@ -2066,8 +2047,9 @@ def create_backup():
                             dump_path = Path(dirpath) / filename
                             if dump_path.exists():
                                 import shutil
-                                target = backup_dir / f"{backup_name}_redis.rdb"
-                                shutil.copy2(dump_path, target)
+                                target = directory / f"{backup_name}_redis.rdb"
+                                with publish_backup_file(target) as staged:
+                                    shutil.copyfile(dump_path, staged)
                                 components['redis'] = True
                                 sizes['redis_mb'] = round(target.stat().st_size / (1024 * 1024), 2)
                     except Exception:
@@ -2086,8 +2068,8 @@ def create_backup():
             'sizes': sizes
         }
         
-        metadata_file = backup_dir / f'{backup_name}.json'
-        with open(metadata_file, 'w') as f:
+        metadata_file = directory / f'{backup_name}.json'
+        with publish_backup_file(metadata_file) as staged, staged.open('w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2)
 
         return jsonify({
@@ -2103,144 +2085,63 @@ def create_backup():
 @admin_bp.route('/backups/api/restore', methods=['POST'])
 @login_required
 @admin_required
+@CSRFProtection.csrf_protect()
 def restore_backup():
     """Restore from a backup"""
+    from contextlib import closing
     import gzip
-    from pathlib import Path
+    from services.backup_sql import read_backup_inserts
+
+    data = request.get_json(silent=True)
+    backup_name = data.get('backup_name') if isinstance(data, dict) else None
     
-    data = request.get_json()
-    backup_name = data.get('backup_name')
-    
-    if not backup_name or not backup_name.startswith('backup_'):
+    if not valid_backup_name(backup_name):
         return jsonify({'success': False, 'error': 'Invalid backup name'})
     
     try:
-        backup_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-        backup_file = backup_dir / f'{backup_name}.sql.gz'
+        backup_file = backup_dir() / f'{backup_name}.sql.gz'
         
-        if not backup_file.exists():
+        if not regular_file(backup_file):
             return jsonify({'success': False, 'error': 'Backup file not found'})
-        
-        # Read and execute SQL dump
+
+        with gzip.open(backup_file, 'rt', encoding='utf-8') as f:
+            statements = read_backup_inserts(f.read())
+
         import pymysql
         from urllib.parse import urlparse
         
         db_uri = current_app.config.get('SQLALCHEMY_DATABASE_URI')
         parsed = urlparse(db_uri)
         
-        conn = pymysql.connect(
+        with closing(pymysql.connect(
             host=parsed.hostname,
             port=parsed.port or 3306,
             user=parsed.username,
             password=parsed.password,
             database=parsed.path.lstrip('/'),
-            charset='utf8mb4'
-        )
-        
-        cursor = conn.cursor()
-        
-        # Disable foreign key checks for restore
-        cursor.execute('SET FOREIGN_KEY_CHECKS=0')
-        
-        # Read backup file
-        with gzip.open(backup_file, 'rt', encoding='utf-8') as f:
-            sql_content = f.read()
-        
-        # Parse SQL to extract only INSERT statements (skip DROP/CREATE)
-        # We only want to restore DATA, not recreate table structures
-        statements = []
-        current_statement = []
-        
-        for line in sql_content.split('\n'):
-            line = line.strip()
-            
-            # Skip comments and empty lines
-            if line.startswith('--') or not line:
-                continue
-            
-            # Skip DROP TABLE and CREATE TABLE statements
-            # We only want INSERT statements (data restoration)
-            if line.upper().startswith('DROP TABLE') or line.upper().startswith('CREATE TABLE'):
-                continue
-            
-            current_statement.append(line)
-            
-            # Check if statement is complete (ends with semicolon)
-            if line.endswith(';'):
-                full_statement = ' '.join(current_statement).strip()
-                if full_statement:
-                    statements.append(full_statement)
-                current_statement = []
-        
-        # Add any remaining statement
-        if current_statement:
-            full_statement = ' '.join(current_statement).strip()
-            if full_statement and full_statement.endswith(';'):
-                statements.append(full_statement)
-        
-        # Get list of tables to clear
-        cursor.execute("SHOW TABLES")
-        tables = [table[0] for table in cursor.fetchall()]
-        
-        # Clear all existing data from tables (DELETE, not DROP)
-        tables_cleared = 0
-        for table in tables:
+            charset='utf8mb4',
+            autocommit=False,
+        )) as conn:
             try:
-                # Skip system/migration tables if any
-                if table in ['alembic_version', 'migrations']:
-                    continue
-                cursor.execute(f"DELETE FROM `{table}`")
-                tables_cleared += 1
-            except pymysql.err.Error as e:
-                # Some tables might fail, continue with others
-                pass
-        
-        # Execute INSERT statements with proper error handling
-        errors = []
-        success_count = 0
-        
-        for i, statement in enumerate(statements):
-            try:
-                # Only process SET and INSERT statements
-                if statement.upper().startswith('SET '):
-                    cursor.execute(statement)
-                    success_count += 1
-                elif statement.upper().startswith('INSERT '):
-                    cursor.execute(statement)
-                    success_count += 1
-                    
-            except pymysql.err.Error as e:
-                error_msg = f"Statement {i+1}: {str(e)[:100]}"
-                errors.append(error_msg)
-                # Continue with other statements instead of failing completely
-                continue
-        
-        # Re-enable foreign key checks
-        cursor.execute('SET FOREIGN_KEY_CHECKS=1')
-        
-        conn.commit()
-        conn.close()
-        
-        # Clear all caches
-        from services.cache import cache_service
+                with conn.cursor() as cursor:
+                    cursor.execute('SET FOREIGN_KEY_CHECKS=0')
+                    cursor.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
+                    tables = [row[0] for row in cursor.fetchall() if row[0] not in ('alembic_version', 'migrations')]
+                    for table in tables:
+                        cursor.execute(f"DELETE FROM `{table.replace('`', '``')}`")
+                    for statement in statements:
+                        cursor.execute(statement)
+                    cursor.execute('SET FOREIGN_KEY_CHECKS=1')
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
         cache_service.clear_all()
-        
-        if errors and success_count == 0:
-            return jsonify({
-                'success': False,
-                'error': f'Restore failed. No data could be restored. Errors: {"; ".join(errors[:3])}'
-            })
-        elif errors:
-            return jsonify({
-                'success': True,
-                'message': f'Backup restored! Cleared {tables_cleared} tables and inserted {success_count} records. Some minor errors occurred but restore succeeded. All caches cleared.',
-                'warnings': errors[:5]  # Show first 5 errors
-            })
-        else:
-            return jsonify({
-                'success': True,
-                'message': f'Backup restored successfully! Cleared {tables_cleared} tables and inserted {success_count} records. All caches cleared.'
-            })
+        return jsonify({
+            'success': True,
+            'message': f'Backup restored successfully. Restored {len(statements)} data statements.',
+        })
             
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -2249,26 +2150,17 @@ def restore_backup():
 @admin_bp.route('/backups/api/delete', methods=['POST'])
 @login_required
 @admin_required
+@CSRFProtection.csrf_protect()
 def delete_backup():
     """Delete a backup"""
-    from pathlib import Path
+    data = request.get_json(silent=True)
+    backup_name = data.get('backup_name') if isinstance(data, dict) else None
     
-    data = request.get_json()
-    backup_name = data.get('backup_name')
-    
-    if not backup_name or not backup_name.startswith('backup_'):
+    if not valid_backup_name(backup_name):
         return jsonify({'success': False, 'error': 'Invalid backup name'})
     
     try:
-        backup_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-        backup_file = backup_dir / f'{backup_name}.sql.gz'
-        metadata_file = backup_dir / f'{backup_name}.json'
-        
-        # Delete files
-        if backup_file.exists():
-            backup_file.unlink()
-        if metadata_file.exists():
-            metadata_file.unlink()
+        delete_backup_files(backup_dir(), backup_name)
         
         return jsonify({'success': True, 'message': 'Backup deleted successfully'})
             
@@ -2282,26 +2174,26 @@ def delete_backup():
 def download_backup(backup_name):
     """Download a backup file"""
     from flask import send_file
-    from pathlib import Path
-    
-    if not backup_name.startswith('backup_'):
+
+    if not valid_backup_name(backup_name):
         flash('Invalid backup name', 'error')
         return redirect(url_for('admin.backups'))
     
     try:
-        backup_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-        backup_file = backup_dir / f'{backup_name}.sql.gz'
+        backup_file = backup_dir() / f'{backup_name}.sql.gz'
         
-        if not backup_file.exists():
+        if not regular_file(backup_file):
             flash('Backup file not found', 'error')
             return redirect(url_for('admin.backups'))
         
-        return send_file(
+        response = send_file(
             backup_file,
             as_attachment=True,
             download_name=f'{backup_name}.sql.gz',
             mimetype='application/gzip'
         )
+        response.cache_control.no_store = True
+        return response
         
     except Exception as e:
         flash(f'Download failed: {str(e)}', 'error')
@@ -2311,12 +2203,9 @@ def download_backup(backup_name):
 @admin_bp.route('/backups/api/upload', methods=['POST'])
 @login_required
 @admin_required
+@CSRFProtection.csrf_protect()
 def upload_backup():
     """Upload a backup file for restoration"""
-    from pathlib import Path
-    from datetime import datetime
-    import json
-    
     try:
         if 'backup_file' not in request.files:
             return jsonify({'success': False, 'error': 'No file uploaded'})
@@ -2330,18 +2219,17 @@ def upload_backup():
             return jsonify({'success': False, 'error': 'Invalid file type. Must be .sql.gz'})
         
         # Save to backups directory
-        backup_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        directory = backup_dir()
         
         # Generate name if not already in backup format
-        if file.filename.startswith('backup_'):
-            backup_name = file.filename.replace('.sql.gz', '')
-        else:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_name = file.filename.removesuffix('.sql.gz')
+        if not valid_backup_name(backup_name):
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
             backup_name = f'backup_uploaded_{timestamp}'
         
-        backup_file = backup_dir / f'{backup_name}.sql.gz'
-        file.save(backup_file)
+        backup_file = directory / f'{backup_name}.sql.gz'
+        with publish_backup_file(backup_file) as staged:
+            file.save(staged)
         
         # Create metadata
         metadata = {
@@ -2352,8 +2240,8 @@ def upload_backup():
             'size_mb': backup_file.stat().st_size / (1024 * 1024)
         }
         
-        metadata_file = backup_dir / f'{backup_name}.json'
-        with open(metadata_file, 'w') as f:
+        metadata_file = directory / f'{backup_name}.json'
+        with publish_backup_file(metadata_file) as staged, staged.open('w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2)
         
         return jsonify({
@@ -2362,6 +2250,8 @@ def upload_backup():
             'backup': metadata
         })
         
+    except FileExistsError:
+        return jsonify({'success': False, 'error': 'A backup with this name already exists'}), 409
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 

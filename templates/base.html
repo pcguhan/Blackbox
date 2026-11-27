@@ -101,12 +101,13 @@
                         <li class="nav-item dropdown">
                             <button class="nav-link dropdown-toggle site-nav-control account-control" type="button" id="userDropdown"
                                     aria-controls="userMenu" aria-expanded="false" data-bs-toggle="dropdown">
-                                <i class="bi bi-person-circle" aria-hidden="true"></i>
+                                {% if current_user.avatar_filename %}<img src="{{ url_for('profile_settings.serve_avatar', filename=current_user.avatar_filename) }}" alt="" width="24" height="24" class="rounded-circle object-fit-cover">{% else %}<i class="bi bi-person-circle" aria-hidden="true"></i>{% endif %}
                                 <span class="account-name">{{ current_user.full_name if current_user.auth_provider == 'google' and current_user.full_name else current_user.username }}</span>
                             </button>
                             <ul id="userMenu" class="dropdown-menu dropdown-menu-end account-menu" aria-labelledby="userDropdown">
                                 <li><a class="dropdown-item" href="{{ url_for('auth.profile') }}"><i class="bi bi-person" aria-hidden="true"></i> Profile</a></li>
                                 <li><a class="dropdown-item" href="/guide"><i class="bi bi-book" aria-hidden="true"></i> Guide</a></li>
+                                <li><a class="dropdown-item" href="{{ url_for('profile_settings.settings_page') }}"><i class="bi bi-sliders" aria-hidden="true"></i> Profile settings</a></li>
                                 {% if teams_enabled and current_user.team_id %}
                                 <li><a class="dropdown-item" href="{{ url_for('teams.view_team', team_id=current_user.team_id) }}"><i class="bi bi-people" aria-hidden="true"></i> My Team</a></li>
                                 {% elif teams_enabled %}

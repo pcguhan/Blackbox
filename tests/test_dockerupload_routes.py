@@ -266,7 +266,7 @@ class DockerUploadRouteTests(unittest.TestCase):
             db.session.commit()
         with mock.patch.dict(app.config, {'UPLOAD_FOLDER': str(self.root)}):
             for path in ['/files/random.md', '/files/SolutioN.md', '/static/docker/SOLUTION.md', '/uploads/SOLUTION.md']:
-                self.assertEqual(self.client.get(path).status_code, 404)
+                self.assertIn(self.client.get(path).status_code, (302, 404))
         self.login()
         self.assertEqual(self.client.post('/admin/challenges/create', data={
             'csrf_token': self.token(), 'files': (io.BytesIO(b'private'), 'SOLUTION.md'),

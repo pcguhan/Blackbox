@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import text
 from app import create_app
 from scripts.schema_auth import ensure_auth_schema
+from scripts.schema_backups import ensure_profile_schema
 
 app = create_app()
 
@@ -20,6 +21,7 @@ with app.app_context():
         from scripts.db_schema import ensure_docker_schema
         ensure_docker_schema()
         ensure_auth_schema()
+        ensure_profile_schema()
         print("Docker schema check complete")
     except Exception as e:
         print(f"Failed to ensure docker schema: {e}")

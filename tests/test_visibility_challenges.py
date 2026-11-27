@@ -214,7 +214,7 @@ class ChallengeVisibility(unittest.TestCase):
             _, _, filename = self.challenge('Public fixture')
             db.session.commit()
         (self.uploads / 'unregistered.txt').write_text('Unregistered attachment', encoding='utf-8')
-        self.assertEqual(app.test_client().get(f'/files/{filename}').status_code, 404)
+        self.assertEqual(app.test_client().get(f'/files/{filename}').status_code, 302)
         self.assertEqual(self.player.get('/files/unregistered.txt').status_code, 404)
         self.assertEqual(self.admin.get('/files/unregistered.txt').status_code, 404)
         with self.player.get(f'/files/{filename}') as attachment:

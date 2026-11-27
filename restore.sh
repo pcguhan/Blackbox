@@ -3,9 +3,13 @@
 # Restore script for CTF Platform
 # Restores database, uploads, and Redis data from a backup
 
-set -e
+set -eo pipefail
+umask 077
 
-BACKUP_DIR="/var/backups/ctf"
+BACKUP_DIR="$(realpath -m -- "${BACKUP_DIR:-/var/backups/ctf}")" || exit 1
+case "${BACKUP_DIR}/" in
+    /var/uploads/*) echo "BACKUP_DIR must be outside /var/uploads" >&2; exit 1 ;;
+esac
 
 # MySQL credentials from environment
 DB_HOST="${DB_HOST:-db}"
@@ -19,15 +23,19 @@ if [ -z "$1" ]; then
     echo "Usage: $0 <backup_name>"
     echo ""
     echo "Available backups:"
-    find "${BACKUP_DIR}" -maxdepth 1 -type d -name "backup_*" | sort -r | head -20 | xargs -n1 basename
+    find "${BACKUP_DIR}" -maxdepth 1 -type d -name "backup_*" -printf '%f\n' | sort -r | sed -n '1,20p'
     exit 1
 fi
 
 BACKUP_NAME="$1"
+if [[ ! "${BACKUP_NAME}" =~ ^backup_[a-zA-Z0-9_-]+$ ]]; then
+    echo "Invalid backup name." >&2
+    exit 1
+fi
 BACKUP_PATH="${BACKUP_DIR}/${BACKUP_NAME}"
 
 # Validate backup exists
-if [ ! -d "${BACKUP_PATH}" ]; then
+if [ ! -d "${BACKUP_PATH}" ] || [ -L "${BACKUP_PATH}" ]; then
     echo "Error: Backup '${BACKUP_NAME}' not found at ${BACKUP_PATH}"
     exit 1
 fi

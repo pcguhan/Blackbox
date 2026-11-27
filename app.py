@@ -2,14 +2,18 @@ import gevent.monkey
 gevent.monkey.patch_all()
 
 from flask import Flask, render_template, send_from_directory, send_file, abort, flash, redirect, request, url_for
-from flask_login import LoginManager, current_user
+from flask_login import LoginManager, current_user, login_required
 from flask.json.provider import DefaultJSONProvider
 from config import config
 from models import db
 from models.user import User
+from scripts.schema_backups import ensure_profile_schema
 from services.cache import cache_service
 from services.websocket import WebSocketService, socketio
 from services.file_storage import file_storage
+from services.backup_paths import init_backup_paths
+from routes.profile_settings import profile_settings_bp
+from routes.admin_versions import admin_versions_bp
 from security_utils import CSRFProtection, init_security
 import os
 from decimal import Decimal
@@ -32,6 +36,7 @@ def create_app(config_name=None):
     
     app = Flask(__name__, static_folder=static_folder, static_url_path='/static')
     app.config.from_object(config[config_name])
+    init_backup_paths(app)
     
     # Set custom JSON provider
     app.json = DecimalJSONProvider(app)
@@ -139,6 +144,8 @@ def create_app(config_name=None):
         return response
     app.register_blueprint(appearance_admin_bp)
     app.register_blueprint(docker_upload_bp)
+    app.register_blueprint(profile_settings_bp)
+    app.register_blueprint(admin_versions_bp)
     
     # Setup check middleware
     @app.before_request
@@ -185,11 +192,14 @@ def create_app(config_name=None):
         """Serve uploaded logo files from /var/uploads/logos"""
         logos_folder = app.config['LOGO_UPLOAD_FOLDER']
         try:
-            return send_from_directory(logos_folder, filename)
+            response = send_from_directory(logos_folder, filename)
+            response.headers['Content-Security-Policy'] = "default-src 'none'; img-src 'self'; sandbox"
+            return response
         except FileNotFoundError:
             abort(404)
     
     @app.route('/files/<path:filename>')
+    @login_required
     def serve_file(filename):
         """Serve uploaded files with original filename"""
         from models.file import ChallengeFile
@@ -207,18 +217,23 @@ def create_app(config_name=None):
         upload_folder = os.path.realpath(app.config.get('UPLOAD_FOLDER', 'uploads'))
         stored_path = file_record.relative_path.replace('\\', '/')
         file_path = os.path.realpath(os.path.join(upload_folder, stored_path))
-        if not file_path.startswith(upload_folder + os.sep) or not os.path.isfile(file_path):
+        legacy_backups = os.path.realpath(os.path.join(upload_folder, 'backups'))
+        if (not file_path.startswith(upload_folder + os.sep) or not os.path.isfile(file_path)
+                or file_path.startswith(legacy_backups + os.sep) or stored_path.split('/', 1)[0] == 'backups'):
             abort(404)
 
         if (file_record.original_filename or '').rstrip(' .').casefold() == 'solution.md':
             abort(404)
 
-        return send_file(
+        response = send_file(
             file_path,
             as_attachment=True,
             download_name=file_record.original_filename,
             mimetype=file_record.mime_type or 'application/octet-stream'
         )
+        response.cache_control.private = True
+        response.cache_control.no_store = True
+        return response
     
     @app.route('/favicon.ico')
     def favicon():
@@ -353,6 +368,7 @@ if not app.testing:
         try:
             from scripts.db_schema import ensure_docker_schema
             ensure_docker_schema()
+            ensure_profile_schema()
             app.logger.info("Ensured docker DB schema and defaults")
         except Exception as e:
             app.logger.warning(f"Could not ensure docker DB schema on startup: {e}")

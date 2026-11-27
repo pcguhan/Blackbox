@@ -14,6 +14,7 @@ import pymysql
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from models.settings import Settings
+from services.backup_paths import archive_uploads, backup_dir, delete_backup_files, publish_backup_file, regular_file
 
 logger = logging.getLogger(__name__)
 
@@ -116,13 +117,12 @@ class BackupScheduler:
                 db_uri = self.app.config.get('SQLALCHEMY_DATABASE_URI')
                 
                 # Create backup directory
-                backup_dir = Path(self.app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-                backup_dir.mkdir(parents=True, exist_ok=True)
+                directory = backup_dir()
                 
                 # Generate backup name
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
                 backup_name = f'backup_auto_{timestamp}'
-                backup_file = backup_dir / f'{backup_name}.sql.gz'
+                backup_file = directory / f'{backup_name}.sql.gz'
                 
                 # Export database to SQL dump
                 parsed = urlparse(db_uri)
@@ -192,7 +192,7 @@ class BackupScheduler:
                 conn.close()
                 
                 # Write compressed backup
-                with gzip.open(backup_file, 'wt', encoding='utf-8') as f:
+                with publish_backup_file(backup_file) as staged, gzip.open(staged, 'wt', encoding='utf-8') as f:
                     f.write('\n'.join(sql_dump))
                 # Optional: include uploads and redis snapshot (best-effort)
                 components = {
@@ -216,12 +216,10 @@ class BackupScheduler:
                 if include_uploads:
                     try:
                         uploads_dir = Path(self.app.config.get('UPLOAD_FOLDER', 'static/uploads'))
-                        uploads_archive = backup_dir / f"{backup_name}_uploads.tar.gz"
+                        uploads_archive = directory / f"{backup_name}_uploads.tar.gz"
                         # Create tarball of uploads (skip if missing)
                         if uploads_dir.exists():
-                            import tarfile
-                            with tarfile.open(uploads_archive, 'w:gz') as tar:
-                                tar.add(uploads_dir, arcname='uploads')
+                            archive_uploads(uploads_dir, uploads_archive)
                             components['uploads'] = True
                             sizes['uploads_mb'] = round(uploads_archive.stat().st_size / (1024 * 1024), 2)
                     except Exception as e:
@@ -259,9 +257,10 @@ class BackupScheduler:
                                 if dirpath and filename:
                                     dump_path = Path(dirpath) / filename
                                     if dump_path.exists():
-                                        target = backup_dir / f"{backup_name}_redis.rdb"
+                                        target = directory / f"{backup_name}_redis.rdb"
                                         import shutil
-                                        shutil.copy2(dump_path, target)
+                                        with publish_backup_file(target) as staged:
+                                            shutil.copyfile(dump_path, staged)
                                         components['redis'] = True
                                         sizes['redis_mb'] = round(target.stat().st_size / (1024 * 1024), 2)
                             except Exception:
@@ -281,8 +280,8 @@ class BackupScheduler:
                     'sizes': sizes
                 }
 
-                metadata_file = backup_dir / f'{backup_name}.json'
-                with open(metadata_file, 'w') as f:
+                metadata_file = directory / f'{backup_name}.json'
+                with publish_backup_file(metadata_file) as staged, staged.open('w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2)
                 
                 # Update last backup time
@@ -292,28 +291,24 @@ class BackupScheduler:
                 logger.info(f"Backup size: {metadata['size_mb']} MB, Tables: {metadata['tables']}")
                 
                 # Keep only last 10 automatic backups
-                self._cleanup_old_backups(backup_dir)
+                self._cleanup_old_backups(directory)
         
         except Exception as e:
             logger.error(f"Automatic backup failed: {str(e)}", exc_info=True)
     
-    def _cleanup_old_backups(self, backup_dir):
+    def _cleanup_old_backups(self, directory):
         """Keep only the most recent automatic backups"""
         try:
             max_backups = 10  
             
             auto_backups = sorted(
-                backup_dir.glob('backup_auto_*.sql.gz'),
+                (path for path in directory.glob('backup_auto_*.sql.gz') if regular_file(path)),
                 key=lambda f: f.stat().st_mtime,
                 reverse=True
             )
             
             for backup_file in auto_backups[max_backups:]:
-                metadata_file = backup_file.with_suffix('.json')
-                
-                backup_file.unlink()
-                if metadata_file.exists():
-                    metadata_file.unlink()
+                delete_backup_files(directory, backup_file.name.removesuffix('.sql.gz'))
                 
                 logger.info(f"Removed old automatic backup: {backup_file.name}")
         
