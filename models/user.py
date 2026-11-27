@@ -1,6 +1,7 @@
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_login import UserMixin
+from sqlalchemy.dialects.mysql import VARCHAR
 from models import db
 
 class User(UserMixin, db.Model):
@@ -11,6 +12,11 @@ class User(UserMixin, db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False, index=True)
     email = db.Column(db.String(120), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
+    google_sub = db.Column(db.String(255).with_variant(
+        VARCHAR(255, charset='ascii', collation='ascii_bin'), 'mysql', 'mariadb'
+    ), unique=True, index=True)
+    roll_number = db.Column(db.String(9))
+    auth_provider = db.Column(db.String(6), nullable=False, default='local', server_default='local')
     
     # User info
     full_name = db.Column(db.String(120))

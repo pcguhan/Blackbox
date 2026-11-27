@@ -99,6 +99,11 @@ class Config:
     # These headers are managed by security_utils.py
     # Additional security settings can be added here
     
+    # Google sign-in
+    GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
+    GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
+    GOOGLE_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', '')
+
     # Email
     MAIL_SERVER = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
     MAIL_PORT = int(os.getenv('MAIL_PORT', 587))
