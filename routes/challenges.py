@@ -263,8 +263,7 @@ def submit_flag(challenge_id):
     challenge = db.session.get(Challenge, challenge_id)
     if not is_challenge_visible(challenge, current_user):
         return jsonify(success=False, message='Challenge not found'), 404
-    if current_user.is_admin and not Settings.is_ctf_running():
-        return jsonify(success=False, message='The event is currently unavailable.'), 403
+    # Admins may test flags at any time; tests never create solves or points.
 
     team = current_user.get_team() if Settings.get('teams_enabled', True, type='bool') else None
     team_id = team.id if team else None
@@ -670,7 +669,7 @@ def _submit_participant_flag(challenge_id, submitted_flag, team_id):
             from models.act_unlock import ActUnlock
 
             act_owner = None if team_id else current_user.id
-            if not ActUnlock.is_act_unlocked(challenge.unlocks_act, user_id=act_owner, team_id=team_id):
+            if challenge.unlocks_act not in unlocked_acts_for(current_user):
                 db.session.add(ActUnlock(act=challenge.unlocks_act, user_id=act_owner, team_id=team_id,
                                          unlocked_by_challenge_id=challenge_id))
                 unlocked_act = challenge.unlocks_act
