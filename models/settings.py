@@ -19,6 +19,34 @@ class Settings(db.Model):
     CACHE_PREFIX = 'settings:'
     CACHE_TIMEOUT = 300 
     CACHE_ALL_KEY = 'settings:all'
+
+    SITE_PALETTES = {
+        'default': 'Default',
+        'graphite': 'Graphite',
+        'forest': 'Forest',
+        'copper': 'Copper',
+        'paper': 'Paper',
+        'navy': 'Navy/Blue',
+        'neon': 'Neon',
+    }
+    SITE_FONTS = {
+        'default': 'Default (Segoe UI)',
+        'georgia': 'Georgia',
+        'verdana': 'Verdana',
+        'courier': 'Courier New',
+    }
+
+    @classmethod
+    def site_palette(cls):
+        palette = cls.get('site_theme', 'default')
+        if palette == 'light':  # Legacy alias recognized by the fork's theme script.
+            return 'paper'
+        return palette if isinstance(palette, str) and palette in cls.SITE_PALETTES else 'default'
+
+    @classmethod
+    def site_font(cls):
+        font = cls.get('site_font', 'default')
+        return font if isinstance(font, str) and font in cls.SITE_FONTS else 'default'
     
     @staticmethod
     def _get_cache():
@@ -108,6 +136,22 @@ class Settings(db.Model):
     @staticmethod
     def set(key, value, value_type='string', description=None):
         """Set setting value by key and invalidate distributed cache"""
+        setting = Settings._stage(key, value, value_type, description)
+        db.session.commit()
+        Settings.clear_cache(key)
+        return setting
+
+    @staticmethod
+    def set_many(updates):
+        """Save related settings together and invalidate their cache entries."""
+        for key, (value, value_type, description) in updates.items():
+            Settings._stage(key, value, value_type, description)
+        db.session.commit()
+        for key in updates:
+            Settings.clear_cache(key)
+
+    @staticmethod
+    def _stage(key, value, value_type, description):
         setting = Settings.query.filter_by(key=key).first()
         
         if not setting:
@@ -125,11 +169,6 @@ class Settings(db.Model):
         setting.value_type = value_type
         if description:
             setting.description = description
-        
-        db.session.commit()
-        
-        # Invalidate cache across ALL workers (distributed via Redis)
-        Settings.clear_cache(key)
         
         return setting
     

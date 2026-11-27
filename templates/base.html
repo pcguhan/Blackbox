@@ -1,6 +1,5 @@
 ﻿<!DOCTYPE html>
-{% set site_theme = settings.get('site_theme', 'default') %}
-<html lang="en" data-bs-theme="{{ 'light' if site_theme == 'paper' else 'dark' }}" data-theme="{{ site_theme }}">
+<html lang="en" data-bs-theme="{{ 'light' if site_palette == 'paper' else 'dark' }}" data-theme="{{ site_palette }}" data-font="{{ site_font }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -14,8 +13,10 @@
     <link href="{{ url_for('static', filename='vendor/bootstrap-icons.css') }}" rel="stylesheet">
     <!-- Custom CSS -->
     <link href="{{ url_for('static', filename='css/design.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/themes-extra.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/account-menu.css') }}" rel="stylesheet">
 
-    <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/theme.js') }}" defer></script>
     <!-- Custom Background Theme -->
     {% if settings.get('custom_background_enabled') and settings.get('custom_background_css') %}
     <style id="custom-background-theme">
@@ -29,8 +30,8 @@
     <div class="technology-background" aria-hidden="true" style="background-image: url('{{ url_for('static', filename='images/background.png') }}')"></div>
     <a href="#main-content" class="skip-link">Skip to content</a>
     <!-- Navigation -->
-    <nav class="navbar navbar-expand-lg navbar-dark">
-        <div class="container">
+    <nav class="navbar navbar-expand-lg navbar-dark site-nav" aria-label="Main navigation">
+        <div class="container site-shell">
             <a class="navbar-brand" href="{{ url_for('index') }}">
                 {% if ctf_logo %}
                     <img src="{{ url_for('serve_logo', filename=ctf_logo) }}"
@@ -73,7 +74,7 @@
                     {% endif %}
                     {% endif %}
                 </ul>
-                <ul class="navbar-nav">
+                <ul class="navbar-nav site-nav-actions">
                     {% if current_user.is_authenticated %}
                         {% if current_user.is_admin %}
                         <li class="nav-item">
@@ -83,27 +84,39 @@
                         </li>
                         {% endif %}
                         <li class="nav-item dropdown">
-                            <a class="nav-link" href="#" id="notificationsDropdown" role="button" aria-label="Notifications" aria-expanded="false" data-bs-toggle="dropdown">
-                                <i class="bi bi-bell"></i>
-                                <span id="notifBadge" class="badge bg-danger" style="display:none; font-size:0.65rem;">0</span>
-                            </a>
-                            <ul class="dropdown-menu dropdown-menu-end notification-menu" aria-labelledby="notificationsDropdown">
-                                <li class="dropdown-header">Notifications</li>
-                                <li><div id="notifList" class="list-group list-group-flush" ></div></li>
-                            </ul>
+                            <button class="nav-link site-nav-control" type="button" id="notificationsDropdown"
+                                    aria-label="Notifications" aria-controls="notificationsMenu" aria-expanded="false" data-bs-toggle="dropdown">
+                                <i class="bi bi-bell" aria-hidden="true"></i>
+                                <span class="d-lg-none">Notifications</span>
+                                <span id="notifBadge" class="badge bg-danger" aria-hidden="true" hidden>0</span>
+                            </button>
+                            <section id="notificationsMenu" class="dropdown-menu dropdown-menu-end notification-menu" aria-labelledby="notificationHeading">
+                                <div class="site-menu-heading">
+                                    <h2 id="notificationHeading">Notifications</h2>
+                                    <span id="notificationStatus" class="text-muted small" role="status"></span>
+                                </div>
+                                <div id="notifList" class="list-group list-group-flush" tabindex="0" role="region" aria-label="Recent notifications"></div>
+                            </section>
                         </li>
                         <li class="nav-item dropdown">
-                            <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" aria-expanded="false"
-                               data-bs-toggle="dropdown">
-                                {{ current_user.username }}
-                            </a>
-                            <ul class="dropdown-menu dropdown-menu-end">
-                                <li><a class="dropdown-item" href="{{ url_for('auth.profile') }}">Profile</a></li>
+                            <button class="nav-link dropdown-toggle site-nav-control account-control" type="button" id="userDropdown"
+                                    aria-controls="userMenu" aria-expanded="false" data-bs-toggle="dropdown">
+                                <i class="bi bi-person-circle" aria-hidden="true"></i>
+                                <span class="account-name">{{ current_user.username }}</span>
+                            </button>
+                            <ul id="userMenu" class="dropdown-menu dropdown-menu-end account-menu" aria-labelledby="userDropdown">
+                                <li><a class="dropdown-item" href="{{ url_for('auth.profile') }}"><i class="bi bi-person" aria-hidden="true"></i> Profile</a></li>
+                                <li><a class="dropdown-item" href="/guide"><i class="bi bi-book" aria-hidden="true"></i> Guide</a></li>
                                 {% if teams_enabled and current_user.team_id %}
-                                <li><a class="dropdown-item" href="{{ url_for('teams.view_team', team_id=current_user.team_id) }}">My Team</a></li>
+                                <li><a class="dropdown-item" href="{{ url_for('teams.view_team', team_id=current_user.team_id) }}"><i class="bi bi-people" aria-hidden="true"></i> My Team</a></li>
+                                {% elif teams_enabled %}
+                                <li><a class="dropdown-item" href="{{ url_for('teams.list_teams') }}"><i class="bi bi-people" aria-hidden="true"></i> Teams</a></li>
+                                {% endif %}
+                                {% if current_user.is_admin %}
+                                <li><a class="dropdown-item" href="{{ url_for('admin.dashboard') }}"><i class="bi bi-gear" aria-hidden="true"></i> Admin</a></li>
                                 {% endif %}
                                 <li><hr class="dropdown-divider"></li>
-                                <li><a class="dropdown-item" href="{{ url_for('auth.logout') }}">Logout</a></li>
+                                <li><a class="dropdown-item" href="{{ url_for('auth.logout') }}"><i class="bi bi-box-arrow-right" aria-hidden="true"></i> Logout</a></li>
                             </ul>
                         </li>
                     {% else %}
@@ -122,7 +135,7 @@
     </nav>
 
     <!-- Flash Messages -->
-    <div class="container flash-messages">
+    <div class="container site-shell flash-messages">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}
@@ -136,7 +149,7 @@
     </div>
 
     <!-- Main Content -->
-    <main class="container my-4" id="main-content" tabindex="-1">
+    <main class="container site-shell my-4" id="main-content" tabindex="-1">
         {% block content %}{% endblock %}
     </main>
 

@@ -1,0 +1,45 @@
+:root[data-theme="navy"] {
+    color-scheme: dark;
+    --canvas: #081629;
+    --surface: #102441;
+    --raised: #1a3254;
+    --ink: #eaf2ff;
+    --muted: #b2c4de;
+    --line: #405a7e;
+    --accent: #72b4ff;
+    --accent-rgb: 114, 180, 255;
+    --accent-hover: #a4ceff;
+    --secondary: #efc47f;
+    --panel-rgb: 16, 36, 65;
+}
+
+:root[data-theme="neon"] {
+    color-scheme: dark;
+    --canvas: #05080a;
+    --surface: #0a1014;
+    --raised: #18221e;
+    --ink: #e6eee9;
+    --muted: #a3aebb;
+    --line: #30503d;
+    --accent: #39ff88;
+    --accent-rgb: 57, 255, 136;
+    --accent-hover: #93ffbe;
+    --secondary: #ffbd50;
+    --panel-rgb: 10, 16, 20;
+}
+
+:root[data-font="georgia"] { --bs-font-sans-serif: Georgia, "Times New Roman", serif; }
+:root[data-font="verdana"] { --bs-font-sans-serif: Verdana, Geneva, sans-serif; }
+:root[data-font="courier"] { --bs-font-sans-serif: "Courier New", Courier, monospace; }
+
+.technology-background::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-color: rgba(var(--panel-rgb), .8);
+}
+
+body .container.site-shell {
+    width: calc(100% - 2 * clamp(16px, 3vw, 48px));
+    max-width: none;
+}

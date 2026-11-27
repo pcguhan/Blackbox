@@ -81,6 +81,7 @@ def create_app(config_name=None):
     from routes.setup import setup_bp
     from routes.hints import hints_bp
     from routes.container import container_bp
+    from routes.appearance_admin import appearance_admin_bp
     
     app.register_blueprint(setup_bp)
     app.register_blueprint(auth_bp)
@@ -119,6 +120,7 @@ def create_app(config_name=None):
             if current_user.is_authenticated or g.get('access_revoked'):
                 response.headers['Cache-Control'] = 'no-store'
         return response
+    app.register_blueprint(appearance_admin_bp)
     
     # Setup check middleware
     @app.before_request

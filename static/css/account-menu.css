@@ -1,0 +1,61 @@
+.site-nav .navbar-brand {
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.site-nav .navbar-brand img { flex: none; }
+.site-nav .navbar-toggler { flex: none; }
+
+.site-nav .site-nav-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    border: 1px solid var(--line);
+    color: var(--ink);
+}
+
+.site-nav .site-nav-control[aria-expanded="true"] {
+    background-color: var(--raised);
+    border-color: var(--accent);
+}
+
+.account-control { max-width: 100%; }
+.account-name {
+    max-width: 12ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.site-nav .dropdown-menu { margin-block-start: 8px; }
+.account-menu .dropdown-item { display: flex; align-items: center; gap: 8px; }
+.account-menu .dropdown-item .bi { color: var(--muted); }
+
+.site-menu-heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--line);
+}
+
+.site-menu-heading h2 { margin: 0; font-size: 1rem; }
+.notification-menu #notifList { max-height: min(320px, 45vh); overscroll-behavior: contain; }
+.notification-menu #notifList:focus-visible { outline-offset: -2px; }
+.notification-menu [data-read="0"] {
+    border-inline-start: 3px solid var(--accent);
+    background-color: var(--raised);
+}
+.notification-menu .list-group-item p { white-space: pre-wrap; }
+
+@media (max-width: 991.98px) {
+    .site-nav .navbar-brand { max-width: calc(100% - 64px); margin-inline-end: 0; }
+    .site-nav .site-nav-control { width: 100%; text-align: start; }
+    .account-name { max-width: none; }
+    .site-nav .notification-menu { width: 100%; }
+    .site-nav .nav-auth { width: 100%; }
+}
