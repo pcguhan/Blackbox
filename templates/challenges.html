@@ -3,23 +3,7 @@
 {% block title %}Challenges - {{ ctf_name }}{% endblock %}
 
 {% block content %}
-<style>
-    {% if not act_system_enabled %}
-    /* Hide ACT thermometer and adjust layout when ACT system is disabled */
-    .act-thermometer {
-        display: none !important;
-    }
-    .challenges-container {
-        display: block !important;
-    }
-    .challenges-content {
-        margin-left: 0 !important;
-        max-width: 100% !important;
-    }
-    {% endif %}
-</style>
-
-<div class="challenges-container">
+<div class="challenges-container{{ ' challenges-flat' if not act_system_enabled }}">
     {% if act_system_enabled %}
     <!-- Thermometer Sidebar (only shown when ACT system is enabled) -->
     <div class="act-thermometer">
@@ -36,7 +20,7 @@
                 {% set act_unlocked = current_user.is_admin or act in unlocked_acts %}
                 {% set is_active = loop.first %}
                 <button type="button" class="act-node {% if act_unlocked %}unlocked{% else %}locked{% endif %} {% if is_active %}active{% endif %}"
-                     data-act="{{ act }}" {% if not act_unlocked %}disabled{% endif %}
+                     data-act="{{ act }}" aria-pressed="{{ 'true' if is_active else 'false' }}" {% if not act_unlocked %}disabled{% endif %}
                      onclick="{% if act_unlocked %}switchToAct('{{ act }}'){% endif %}">
                     <span class="node-bubble" aria-hidden="true"></span>
                     <span class="node-label">{{ act }}</span>
@@ -48,28 +32,32 @@
 
     <!-- Main Content Area -->
     <div class="challenges-content">
-        <h2 class="mb-4 content-heading">
-            <i class="bi bi-puzzle-fill"></i> 
-            {% if act_system_enabled %}
-            <span id="current-act-title">ACT I</span>
-            {% else %}
-            <span id="current-act-title">Challenges</span>
-            {% endif %}
-        </h2>
+        <header class="participant-heading">
+            <h1>Challenges</h1>
+            <a class="btn btn-outline-primary" href="{{ url_for('guide.view_guide', _anchor='challenges') }}">How to play</a>
+        </header>
+        {% if act_system_enabled %}<h2 id="current-act-title" class="h4 mb-3">ACT I</h2>{% endif %}
 
         <div class="challenge-filters">
-            <label for="categoryFilter">Category</label>
-            <select id="categoryFilter" class="form-select"><option value="">All categories</option></select>
-            <label class="form-check-label"><input type="checkbox" class="form-check-input" id="unsolvedFilter"> Unsolved only</label>
+            <div class="challenge-search">
+                <label for="challengeSearch" class="form-label">Search challenges</label>
+                <input type="search" id="challengeSearch" class="form-control" placeholder="Title or description">
+            </div>
+            <div>
+                <label for="categoryFilter" class="form-label">Category</label>
+                <select id="categoryFilter" class="form-select"><option value="">All categories</option></select>
+            </div>
+            <div class="challenge-filter-options">
+                <label class="form-check-label"><input type="checkbox" class="form-check-input" id="unsolvedFilter"> Unsolved only</label>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="clearFilters">Clear filters</button>
+            </div>
             <span id="challengeResults" role="status"></span>
-            <button type="button" class="btn btn-sm btn-outline-secondary" id="clearFilters">Clear filters</button>
         </div>
         <p id="noChallengeMatches" class="alert alert-info" hidden>No challenges match these filters.</p>
-        {% if not acts %}
-        <div class="alert alert-info">
+        <p id="noChallengesAvailable" class="alert alert-info" {% if acts %}hidden{% endif %}>
             <i class="bi bi-info-circle"></i> No challenges available yet. Check back later!
-        </div>
-        {% else %}
+        </p>
+        {% if acts %}
             {% if act_system_enabled %}
             <!-- ACT system enabled: show ACT-based content with switching -->
             {% set act_order = ['ACT I', 'ACT II', 'ACT III', 'ACT IV', 'ACT V'] %}
@@ -80,14 +68,12 @@
                     {% if act_unlocked %}
                         {% for category, challenges in acts[act].items() %}
                         <div class="category-section mb-4">
-                            <h4 class="mb-3">
-                                <span class="badge bg-secondary">{{ category }}</span>
-                            </h4>
+                            <h3 class="h5 mb-3">{{ category }}</h3>
                             
                             <div class="row">
                                 {% for challenge in challenges %}
-                                {% include 'components/challenge_card.html' %}
-{% endfor %}
+                                    {% include 'components/challenge_card.html' %}
+                                {% endfor %}
                             </div>
                         </div>
                         {% endfor %}
@@ -107,14 +93,12 @@
             <!-- ACT system disabled: simple category-based listing -->
             {% for category_name, challenges in acts['Challenges'].items() %}
             <div class="category-section mb-4">
-                <h4 class="mb-3">
-                    <span class="badge bg-secondary">{{ category_name }}</span>
-                </h4>
+                <h2 class="h5 mb-3">{{ category_name }}</h2>
                 
                 <div class="row">
                     {% for challenge in challenges %}
-                    {% include 'components/challenge_card.html' %}
-{% endfor %}
+                        {% include 'components/challenge_card.html' %}
+                    {% endfor %}
                 </div>
             </div>
             {% endfor %}

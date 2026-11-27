@@ -80,6 +80,7 @@ def create_app(config_name=None):
     from routes.setup import setup_bp
     from routes.hints import hints_bp
     from routes.container import container_bp
+    from routes.guide import guide_bp
     
     app.register_blueprint(setup_bp)
     app.register_blueprint(auth_bp)
@@ -90,6 +91,7 @@ def create_app(config_name=None):
     app.register_blueprint(notifications_bp)
     app.register_blueprint(hints_bp)
     app.register_blueprint(container_bp)
+    app.register_blueprint(guide_bp)
     
     # Setup check middleware
     @app.before_request

@@ -14,6 +14,7 @@
     <link href="{{ url_for('static', filename='vendor/bootstrap-icons.css') }}" rel="stylesheet">
     <!-- Custom CSS -->
     <link href="{{ url_for('static', filename='css/design.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/pages.css') }}" rel="stylesheet">
 
     <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
     <!-- Custom Background Theme -->
@@ -72,6 +73,7 @@
                     </li>
                     {% endif %}
                     {% endif %}
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('guide.view_guide') }}">Guide</a></li>
                 </ul>
                 <ul class="navbar-nav">
                     {% if current_user.is_authenticated %}

@@ -6,17 +6,17 @@
 <div class="container">
     <div class="row justify-content-center">
         <div class="col-lg-8">
-            <div class="card shadow-lg">
-                <div class="card-body text-center p-5">
+            <div class="card event-state">
+                <div class="card-body text-center">
                     <div class="mb-4">
-                        <i class="bi bi-clock-history" style="font-size: 4rem; color: var(--accent);"></i>
+                        <i class="bi bi-clock-history event-state-icon" aria-hidden="true"></i>
                     </div>
                     
-                    <h2 class="mb-3">{{ page_title }} Coming Soon!</h2>
+                    <h1 class="mb-3">{{ page_title }} Coming Soon!</h1>
                     <p class="text-muted mb-4">The event hasn't started yet. Get ready!</p>
                     
                     <div class="mb-4">
-                        <h3 class="mb-3">Event Starts In:</h3>
+                        <h2 class="h4 mb-3">Event starts in</h2>
                         <div id="countdown" class="d-flex justify-content-center gap-3 flex-wrap">
                             <div class="countdown-box">
                                 <div class="countdown-value" id="days">0</div>
@@ -51,40 +51,6 @@
         </div>
     </div>
 </div>
-
-<style>
-.countdown-box {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-}
-
-.countdown-value {
-    font-size: 3.5rem;
-    font-weight: bold;
-    color: var(--accent);
-    line-height: 1;
-    margin-bottom: 8px;
-}
-
-.countdown-label {
-    font-size: 0.9rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    font-weight: 500;
-}
-
-@media (max-width: 576px) {
-    .countdown-value {
-        font-size: 2.5rem;
-    }
-    
-    .countdown-label {
-        font-size: 0.8rem;
-    }
-}
-</style>
 
 <script>
 // Parse start time from server (converted to platform timezone, then to ISO for JS)

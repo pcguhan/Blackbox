@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Participant guide - {{ ctf_name }}{% endblock %}
+
+{% block content %}
+<header class="participant-heading">
+    <h1>Participant guide</h1>
+    <a class="btn btn-outline-primary" href="{{ url_for('about', _anchor='rules') }}">Event rules</a>
+</header>
+<div class="participant-guide">
+    <nav class="participant-panel guide-toc" aria-label="On this page">
+        <h2>On this page</h2>
+        <ul>
+            <li><a href="#accounts">Registration and sign-in</a></li>
+            <li><a href="#teams">Teams</a></li>
+            <li><a href="#challenges">Challenges and flags</a></li>
+            <li><a href="#categories">Challenge categories</a></li>
+            <li><a href="#containers">Container instances</a></li>
+            <li><a href="#scoring">Scoring and hints</a></li>
+            <li><a href="#timing">Event timing</a></li>
+        </ul>
+    </nav>
+    <div class="guide-content">
+        <section class="participant-panel" id="accounts" aria-labelledby="accounts-title">
+            <h2 id="accounts-title">Registration and sign-in</h2>
+            {% if google_only %}
+            <p class="alert alert-info">Google-only participation is enabled. Participants must use Google to register and sign in.</p>
+            {% endif %}
+            <dl class="guide-definitions">
+                <div><dt>Google sign-in</dt><dd>On the <a href="{{ url_for('auth.login') }}">sign-in page</a>, choose Google when available. Use your verified <code>@vitstudent.ac.in</code> Google account. The first successful sign-in can set up your participant account.</dd></div>
+                <div><dt>Local account</dt><dd>
+                    {% if google_only %}
+                    Local registration and password sign-in are disabled for participants while Google-only mode is on.
+                    {% else %}
+                    When local registration is open, <a href="{{ url_for('auth.register') }}">create an account</a> with a username, email and password. Follow the verification email if the event requires it, then sign in with your username and password. Use <a href="{{ url_for('auth.forgot_password') }}">password reset</a> if you forget your password.
+                    {% endif %}
+                </dd></div>
+            </dl>
+        </section>
+        <section class="participant-panel" id="teams" aria-labelledby="teams-title">
+            <h2 id="teams-title">Teams</h2>
+            {% if not teams_enabled %}<p>Team participation is currently disabled for this event.</p>{% endif %}
+            <p>Choose <a href="{{ url_for('teams.create_team') }}">Create Team</a> to start a team and become its captain. Share the eight-character invite code from your team page with your teammates.</p>
+            <p class="mb-0">To join an existing team, choose <a href="{{ url_for('teams.join_team_by_code') }}">Join Team</a>, enter the invite code, and confirm the team details before joining.</p>
+        </section>
+        <section class="participant-panel" id="challenges" aria-labelledby="challenges-title">
+            <h2 id="challenges-title">Challenges and flags</h2>
+            <p>Open <a href="{{ url_for('challenges.list_challenges') }}">Challenges</a> to search by title or description and filter by category or solve status. Read the brief for provided files, connections, and prerequisites.</p>
+            <p class="mb-0">The default flag format is <code>CYS{...}</code>.{% if flag_prefix != 'CYS' %} This event uses <code>{{ flag_prefix }}{...}</code> as its configured format.{% endif %} If the challenge specifies an override, follow its format. Submit the complete flag, including any required braces, in the Flag field.</p>
+        </section>
+        <section class="participant-panel" id="categories" aria-labelledby="categories-title">
+            <h2 id="categories-title">Challenge categories</h2>
+            <dl class="guide-definitions guide-categories">
+                <div><dt>Web</dt><dd>Analyze websites and web APIs.</dd></div>
+                <div><dt>Cryptography</dt><dd>Work with ciphers, encodings, and protocols.</dd></div>
+                <div><dt>Forensics</dt><dd>Recover evidence from files, disk images, or network captures.</dd></div>
+                <div><dt>OSINT</dt><dd>Answer questions using publicly available information.</dd></div>
+                <div><dt>Reverse engineering</dt><dd>Determine how a compiled program works.</dd></div>
+                <div><dt>Binary exploitation</dt><dd>Analyze how native programs handle memory and inputs.</dd></div>
+                <div><dt>Steganography</dt><dd>Find data hidden inside images, audio, or other files.</dd></div>
+                <div><dt>Miscellaneous</dt><dd>Solve puzzles involving logic, scripting, or other skills.</dd></div>
+            </dl>
+        </section>
+        <section class="participant-panel" id="containers" aria-labelledby="containers-title">
+            <h2 id="containers-title">Container instances</h2>
+            <ol class="guide-steps">
+                <li>Select <strong>Start Container Instance</strong> on a challenge that provides one.</li>
+                <li>When the instance is running, use the connection details shown in its panel. The countdown shows how much time remains.</li>
+                <li>Stop the instance when you finish. If it expires before you solve the challenge, start a new instance and use its displayed connection details.</li>
+            </ol>
+        </section>
+        <section class="participant-panel" id="scoring" aria-labelledby="scoring-title">
+            <h2 id="scoring-title">Scoring and hints</h2>
+            <p>A team earns points once per challenge. When a teammate solves it, the challenge is marked solved for everyone on the team. Static challenges keep their point value. Dynamic challenge values can fall as more teams solve them.</p>
+            <p>A paid hint deducts its displayed cost from the team's score, or from your score if you play without a team. The hint is then available to the whole team when playing together.</p>
+            <p class="mb-0">The leaderboard ranks teams by their scores when team play is enabled.{% if current_user.is_authenticated and (scoreboard_visible or current_user.is_admin) %} <a href="{{ url_for('scoreboard.view_scoreboard') }}">View the leaderboard</a>.{% endif %}</p>
+        </section>
+        <section class="participant-panel" id="timing" aria-labelledby="timing-title">
+            <h2 id="timing-title">Event timing</h2>
+            <p>Challenges open when the event starts. Submissions are closed while the event is paused and after it ends.</p>
+            {% if start_time or end_time %}
+            <dl class="guide-definitions">
+                {% if start_time %}<div><dt>Starts</dt><dd>{{ start_time|format_datetime('%d %b %Y, %H:%M') }} {{ settings.get('timezone', 'UTC') }}</dd></div>{% endif %}
+                {% if end_time %}<div><dt>Ends</dt><dd>{{ end_time|format_datetime('%d %b %Y, %H:%M') }} {{ settings.get('timezone', 'UTC') }}</dd></div>{% endif %}
+            </dl>
+            {% endif %}
+            <p class="mb-0">Look for schedule changes in event announcements.</p>
+        </section>
+    </div>
+</div>
+{% endblock %}

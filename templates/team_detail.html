@@ -3,14 +3,14 @@
 {% block title %}{{ team.name }} - {{ ctf_name }}{% endblock %}
 
 {% block content %}
-<div class="row">
+<div class="row team-page">
     <div class="col-md-8">
-        <h2 class="mb-4">
+        <h1 class="participant-heading mb-4">
             <i class="bi bi-people-fill"></i> {{ team.name }}
             {% if is_captain %}
             <span class="badge bg-warning text-dark ms-2">Captain</span>
             {% endif %}
-        </h2>
+        </h1>
         
         <!-- Team Info Card -->
         <div class="card mb-4">
@@ -73,9 +73,8 @@
                     <div class="col-md-4 fw-bold">Invite Code:</div>
                     <div class="col-md-8">
                         <div class="input-group">
-                            <input type="text" class="form-control" id="invite-code" 
-                                   value="{{ team.invite_code }}" readonly 
-                                   style="letter-spacing: 0.2em; font-weight: bold; font-size: 1.1rem;">
+                            <input type="text" class="form-control team-invite-code" id="invite-code"
+                                   value="{{ team.invite_code }}" aria-label="Invite code" readonly>
                             <button class="btn btn-outline-secondary" type="button" onclick="copyInviteCode()">
                                 <i class="bi bi-clipboard"></i> Copy
                             </button>

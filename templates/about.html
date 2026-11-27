@@ -5,6 +5,7 @@
     <p class="eyebrow">CYSCOM / Field guide</p>
     <h1>Before your<br><span>first flag.</span></h1>
     <p>How to compete, how scoring works, and the rules that keep the event fair.</p>
+    <a class="btn btn-outline-primary mt-3" href="{{ url_for('guide.view_guide') }}">Open the participant guide</a>
 </header>
 <div class="guide-layout">
     <section class="guide-sections" aria-label="Playing guide">
@@ -22,7 +23,7 @@
                 <h2 class="accordion-header" id="headingTwo"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseTwo" aria-expanded="false" aria-controls="collapseTwo"><span class="guide-number">02</span><span class="guide-topic">How to play<small>From account access to a successful submission</small></span></button></h2>
                 <div id="collapseTwo" class="accordion-collapse collapse" aria-labelledby="headingTwo" data-bs-parent="#about-accordion"><div class="accordion-body">
                     <ol class="guide-checklist">
-                        <li><strong>Set up your account.</strong><p>Register with your username, full name, and email, then sign in. Check your email if the event requires verification.</p></li>
+                        <li><strong>Set up your account.</strong><p>See <a href="{{ url_for('guide.view_guide', _anchor='accounts') }}">registration and sign-in</a> for the account options available for this event.</p></li>
                         {% if teams_enabled %}<li><strong>Create or join a team.</strong><p>Use an invite code from your captain, or create your own team. Challenges marked as team-only require a team.</p></li>{% endif %}
                         <li><strong>Read the brief.</strong><p>Choose a challenge, download its files or open its connection, and investigate locally.</p></li>
                         <li><strong>Submit the flag.</strong><p>Paste the flag into the challenge submission form. The result confirms whether it was accepted and shows any points earned.</p></li>
