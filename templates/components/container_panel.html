@@ -73,6 +73,8 @@ function checkContainerStatus() {
                     clearTimeout(statusCheckInterval);
                     statusCheckInterval = null;
                 }
+            } else if (status === 'stopping') {
+                showError('Container removal is pending. Retry cleanup to release the instance.');
             } else if (status === 'error') {
                 showError(container && container.error_message ? container.error_message : 'Container failed to start');
                 statusCheckAttempts = 0;
@@ -188,35 +190,9 @@ function forceStop() {
             showStartButton();
             showSuccess(data.message || 'Containers cleaned up successfully');
         } else {
-            // If cleanup failed, try regular stop
-            return fetchWithCSRF('/container/stop', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    challenge_id: challengeId,
-                    force: true
-                })
-            });
+            showError(data.error || 'Failed to clean up container');
         }
-    })
-    .then(response => {
-        if (response) {
-            return response.json();
-        }
-    })
-    .then(data => {
-        if (data) {
-            if (data.success) {
-                showStartButton();
-                showSuccess('Container stopped successfully');
-            } else {
-                showError(data.error || 'Failed to stop container');
-            }
-        }
-        // Refresh status either way
-        setTimeout(checkContainerStatus, 1000);
+        if (data.success) setTimeout(checkContainerStatus, 1000);
     })
     .catch(error => {
         console.error('Failed to cleanup/stop container:', error);
@@ -245,7 +221,7 @@ function revertContainer() {
     .then(data => {
         if (data.success) {
             if (data.status === 'running') {
-                showRunning(data);
+                showRunning(data.container);
                 showSuccess('Container reverted successfully');
             } else if (data.status === 'starting') {
                 statusCheckAttempts = 0;
@@ -292,7 +268,7 @@ function showStarting(message = 'Starting container...') {
             <div class="spinner-border text-primary mb-3" role="status">
                 <span class="visually-hidden">Loading...</span>
             </div>
-            <p class="text-primary">${message}</p>
+            <p class="text-primary">${escapeContainerText(message)}</p>
             <small class="text-muted">Please wait...</small>
             ${showForceStop ? `
                 <div class="mt-3">
@@ -324,60 +300,28 @@ function showRunning(container) {
             remainingMinutes = Math.floor(diff / 60000);
             const seconds = Math.floor((diff % 60000) / 1000);
             expiresIn = `${remainingMinutes}m ${seconds}s`;
-            
-            // Start countdown
-            setTimeout(() => updateCountdown(container), 1000);
+
         } else {
             expiresIn = 'Expired';
             showControls = false;
         }
     }
     
-    // Build connection info
-    let connectionHtml = '';
-    if (container.connection_info) {
-        // Check if it's a URL
-        if (container.connection_info.startsWith('http://') || container.connection_info.startsWith('https://')) {
-            connectionHtml = `
-                <div class="alert alert-success mb-3 connection-block">
-                    <strong><i class="bi bi-link-45deg"></i> Connection URL:</strong><br>
-                    <a href="${container.connection_info}" target="_blank" rel="noopener noreferrer" class="alert-link fs-5">
-                        ${container.connection_info}
-                    </a>
-                    <button type="button" class="btn btn-sm btn-outline-success ms-2 btn-copy-conn">
-                        <i class="bi bi-clipboard"></i> Copy
-                    </button>
-                </div>
-            `;
-        } else {
-            connectionHtml = `
-                <div class="alert alert-success mb-3 connection-block">
-                    <strong><i class="bi bi-terminal"></i> Connection:</strong><br>
-                    <code>${container.connection_info}</code>
-                    <button type="button" class="btn btn-sm btn-outline-success ms-2 btn-copy-conn">
-                        <i class="bi bi-clipboard"></i> Copy
-                    </button>
-                </div>
-            `;
-        }
-    } else {
-        // Fallback to host:port
-        const hostPort = container.host_port || 'N/A';
-        const hostIp = container.host_ip || 'localhost';
-        const url = `http://${hostIp}:${hostPort}`;
-        connectionHtml = `
-            <div class="alert alert-success mb-3 connection-block">
-                <strong><i class="bi bi-hdd-network"></i> Container Access:</strong><br>
-                <a href="${url}" target="_blank" rel="noopener noreferrer" class="alert-link fs-5">
-                    ${url}
-                </a>
-                <button type="button" class="btn btn-sm btn-outline-success ms-2 btn-copy-conn">
-                    <i class="bi bi-clipboard"></i> Copy
-                </button>
-            </div>
-        `;
-    }
-    
+    const connection = container.connection_info;
+    const isWebLink = connection && /^https?:\/\//i.test(connection);
+    const connectionText = connection ? escapeContainerText(connection) : '';
+    const connectionHtml = showControls && connection ? `
+        <div class="alert alert-success mb-3 connection-block">
+            <strong>${isWebLink ? 'Connection URL' : 'Connection'}:</strong><br>
+            ${isWebLink
+                ? `<a href="${connectionText}" target="_blank" rel="noopener noreferrer" class="alert-link fs-5">${connectionText}</a>`
+                : `<code>${connectionText}</code>`}
+            <button type="button" class="btn btn-sm btn-outline-success ms-2 btn-copy-conn">
+                <i class="bi bi-clipboard"></i> Copy
+            </button>
+        </div>
+    ` : '';
+
     // Warning if less than 10 minutes remaining
     let timeWarning = '';
     if (remainingMinutes < 10 && remainingMinutes > 0) {
@@ -410,6 +354,9 @@ function showRunning(container) {
             <button class="btn btn-danger" onclick="stopContainer()" title="Stop and remove container">
                 <i class="bi bi-stop-fill"></i> Stop Container
             </button>
+            <button class="btn btn-outline-warning" onclick="revertContainer()">
+                <i class="bi bi-arrow-counterclockwise"></i> Revert Container
+            </button>
             <button class="btn btn-outline-secondary btn-sm" onclick="checkContainerStatus()" title="Refresh status">
                 <i class="bi bi-arrow-clockwise"></i> Refresh Status
             </button>
@@ -422,18 +369,20 @@ function showRunning(container) {
         </p>
         ` : `
         <div class="alert alert-warning">
-            <i class="bi bi-hourglass-bottom"></i> Container has expired. Please start a new one.
+            <i class="bi bi-hourglass-bottom"></i> Container has expired.
         </div>
         <div class="text-center">
-            <button class="btn btn-primary" onclick="checkContainerStatus()">
-                <i class="bi bi-play-fill"></i> Start New Container
+            <button class="btn btn-primary" onclick="forceStop()">
+                <i class="bi bi-trash"></i> Clean Up Expired Container
             </button>
         </div>
         `}
     `;
     
-    // Store container data for countdown
-    statusDiv.dataset.containerData = JSON.stringify(container);
+    if (showControls && container.expires_at_ms) {
+        const timer = statusDiv.querySelector('#countdown-timer');
+        setTimeout(() => updateCountdown(container, timer), 1000);
+    }
     // Attach copy handlers to the copy buttons to avoid string-escaping issues in inline onclick handlers.
     try {
         const copyButtons = statusDiv.querySelectorAll('.btn-copy-conn');
@@ -497,9 +446,8 @@ function showRunning(container) {
     }
 }
 
-function updateCountdown(container) {
-    const timerElement = document.getElementById('countdown-timer');
-    if (!timerElement) return;
+function updateCountdown(container, timerElement) {
+    if (!timerElement?.isConnected) return;
     
     // Use expires_at_ms (milliseconds since epoch) if available, otherwise parse ISO string
     // This avoids timezone issues - server sends UTC timestamp, client compares against UTC now
@@ -513,13 +461,19 @@ function updateCountdown(container) {
         timerElement.textContent = `${minutes}m ${seconds < 10 ? '0' : ''}${seconds}s`;
         
         // Continue countdown
-        setTimeout(() => updateCountdown(container), 1000);
+        setTimeout(() => updateCountdown(container, timerElement), 1000);
     } else {
         timerElement.textContent = 'Expired';
         timerElement.classList.add('text-danger');
         // Refresh status to show expired state
         setTimeout(checkContainerStatus, 1000);
     }
+}
+
+function escapeContainerText(value) {
+    return String(value).replace(/[&<>"']/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[character]);
 }
 
 function showError(message) {
@@ -534,7 +488,7 @@ function showError(message) {
     statusDiv.innerHTML = `
         <div class="alert alert-danger mb-3">
             <strong><i class="bi bi-exclamation-triangle-fill"></i> Error</strong><br>
-            ${message}
+            ${escapeContainerText(message)}
         </div>
         <div class="d-grid gap-2">
             <button class="btn btn-primary" onclick="checkContainerStatus()">
@@ -553,7 +507,7 @@ function showSuccess(message) {
     const alert = document.createElement('div');
     alert.className = 'alert alert-success alert-dismissible fade show';
     alert.innerHTML = `
-        <strong> Success!</strong> ${message}
+        <strong> Success!</strong> ${escapeContainerText(message)}
         <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
     `;
     panel.insertBefore(alert, panel.firstChild);

@@ -3,27 +3,33 @@ Docker Container Orchestration Service
 Manages container lifecycle for challenge instances
 """
 
-import docker
-import random
-import hashlib
-import tempfile
-import json
+import io
+import math
 import platform
+import socket
+import tarfile
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import PurePosixPath
+from threading import RLock
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+import docker
 from flask import current_app, request, has_request_context
-from sqlalchemy.orm import joinedload
 from models import db
 from models.container import ContainerInstance, ContainerEvent
 from models.challenge import Challenge
 from models.settings import DockerSettings
-from services.cache import cache_service
-from utils.flag_hmac import generate_hmac_flag
+from utils.flag_hmac import parse_legacy_flag
 
 
 class ContainerOrchestrator:
     """Orchestrates Docker containers for CTF challenges"""
     
+    _lifecycle_lock = RLock()
+
     def __init__(self):
         self.docker_client = None
         self._client_initialized = False
@@ -96,732 +102,401 @@ class ContainerOrchestrator:
             current_app.logger.error(f"Failed to create TLS config: {e}")
             return None
     
+    @contextmanager
+    def lifecycle_transaction(self):
+        # SQLite ignores FOR UPDATE. The local lock also serializes operations
+        # within a worker. MySQL locks the existing singleton across workers.
+        with self._lifecycle_lock:
+            try:
+                settings = (DockerSettings.query.order_by(DockerSettings.id)
+                            .populate_existing().with_for_update().first())
+                if settings is None:
+                    DockerSettings.get_config()
+                    settings = (DockerSettings.query.order_by(DockerSettings.id)
+                                .populate_existing().with_for_update().first())
+                yield settings
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                raise
+
+    @staticmethod
+    def _active_instances():
+        return ContainerInstance.query.filter(
+            ContainerInstance.status.in_(ContainerInstance.ACTIVE_STATUSES)
+        )
+
     def start_container(self, challenge_id, user_id, ip_address, team_id=None):
-        """
-        Start a Docker container for a challenge
-        
-        Args:
-            challenge_id: Challenge ID
-            user_id: User ID
-            ip_address: Client IP address
-            team_id: Team ID (optional)
-        
-        Returns:
-            dict: Success/error response with container details
-        """
-        self._ensure_docker_client()
-        
-        if not self.docker_client:
-            return {
-                'success': False,
-                'error': 'Docker is not configured. Please contact administrator.'
-            }
-        
-        try:
-            # Get challenge and settings
-            challenge = Challenge.query.get(challenge_id)
-            if not challenge:
-                return {'success': False, 'error': 'Challenge not found'}
-            
-            if not challenge.docker_enabled or not challenge.docker_image:
-                return {'success': False, 'error': 'This challenge does not support containers'}
-            
-            # TOCTOU FIX: Lock the Challenge row to serialize container starts
-            # for the same challenge. This prevents two rapid requests from both
-            # passing the existing-container and max-containers checks.
-            db.session.get(Challenge, challenge_id, with_for_update=True)
-            
-            settings = DockerSettings.get_config()
-            
-            # Check if image is allowed
-            if not settings.is_image_allowed(challenge.docker_image):
-                return {
-                    'success': False,
-                    'error': 'This Docker image is not in the allowed repositories'
-                }
-            
-            # Check one container per user limit
-            existing_count = ContainerInstance.query.filter_by(
-                user_id=user_id
-            ).filter(
-                ContainerInstance.status.in_(['starting', 'running'])
-            ).count()
-            
-            if existing_count >= settings.max_containers_per_user:
-                # Eagerly load the challenge relationship
-                existing = ContainerInstance.query.options(
-                    db.joinedload(ContainerInstance.challenge)
-                ).filter_by(
-                    user_id=user_id
-                ).filter(
-                    ContainerInstance.status.in_(['starting', 'running'])
-                ).first()
-                
-                error_msg = 'You already have a container running. Please stop it before starting a new one.'
-                if existing and existing.challenge:
-                    error_msg = f'You already have a container running for: {existing.challenge.name}. Please stop it before starting a new one.'
-                
-                return {
-                    'success': False,
-                    'error': error_msg,
-                    'existing_challenge_id': existing.challenge_id if existing else None
-                }
-            
-            # Check for existing container for this challenge
-            existing_container = ContainerInstance.query.filter_by(
-                challenge_id=challenge_id,
-                user_id=user_id,
-                status='running'
-            ).first()
-            
-            if existing_container:
-                # Check revert cooldown
-                if existing_container.last_revert_time:
-                    cooldown_end = existing_container.last_revert_time + timedelta(
-                        minutes=settings.revert_cooldown_minutes
-                    )
-                    if datetime.utcnow() < cooldown_end:
-                        remaining = (cooldown_end - datetime.utcnow()).total_seconds()
-                        return {
-                            'success': False,
-                            'error': f'Please wait {int(remaining)} seconds before reverting',
-                            'status': 'cooldown',
-                            'remaining_seconds': int(remaining)
-                        }
-                
-                return {
-                    'success': False,
-                    'error': 'Container already running. Use revert to restart.',
-                    'status': 'running',
-                    'container': existing_container.to_dict()
-                }
-            
-            # Generate session ID
-            session_id = hashlib.md5(
-                f"{user_id}_{challenge_id}_{datetime.utcnow().timestamp()}".encode()
-            ).hexdigest()[:16]
-            
-            # Create container name
-            container_name = f"ctf-challenge-user{user_id}-chal{challenge_id}-{session_id}"
-            
-            # Get available port
-            port = self._get_available_port(settings)
-            
-            # Create database record with starting status
-            instance = ContainerInstance(
-                challenge_id=challenge_id,
-                user_id=user_id,
-                team_id=team_id,
-                session_id=session_id,
-                container_id=f"starting_{session_id}",  # Temporary, will be updated
-                container_name=container_name,
-                docker_image=challenge.docker_image,
-                port=port,
-                host_port=port,
-                status='starting',
-                host_ip=self._get_docker_host(),
-                started_at=datetime.utcnow(),
-                expires_at=datetime.utcnow() + timedelta(minutes=settings.container_lifetime_minutes)
-            )
-            db.session.add(instance)
-            db.session.commit()
-            
-            # Log event
-            self._log_event(instance.id, 'starting', 'Starting container', event_type='start')
-            # Generate dynamic flag if docker is enabled
-            dynamic_flag = None
-            if challenge.docker_enabled:
-                dynamic_flag = self._generate_dynamic_flag(challenge, team_id or instance.team_id, instance.user_id)
-                if dynamic_flag:
-                    try:
-                        if hasattr(instance, 'dynamic_flag'):
-                            instance.dynamic_flag = dynamic_flag
-                        else:
-                            cache_service.set(f"dynamic_flag:{session_id}", dynamic_flag, ttl=settings.container_lifetime_minutes * 60)
-                    except Exception:
-                        cache_service.set(f"dynamic_flag:{session_id}", dynamic_flag, ttl=settings.container_lifetime_minutes * 60)
+        return self._launch_container(challenge_id, user_id, ip_address, team_id, revert=False)
 
-            # Start Docker container
-            try:
-                env_vars = {
-                    'CTF_USER_ID': str(user_id),
-                    'CTF_CHALLENGE_ID': str(challenge_id),
-                    'CTF_SESSION_ID': session_id
-                }
-                if dynamic_flag:
-                    env_vars['FLAG'] = dynamic_flag
-
-                # Determine which port the container expects to expose
-                target_port = '80/tcp'
-                try:
-                    image_info = self.docker_client.images.get(challenge.docker_image)
-                    exposed_ports = image_info.attrs.get('Config', {}).get('ExposedPorts', {})
-                    if exposed_ports:
-                        # Get the first exposed port defined in the image
-                        target_port = list(exposed_ports.keys())[0]
-                        if '/' not in target_port:
-                            target_port += '/tcp'
-                except Exception as e:
-                    current_app.logger.warning(f"Failed to inspect image {challenge.docker_image} for ExposedPorts, defaulting to 80/tcp: {e}")
-
-                container = self.docker_client.containers.run(
-                    challenge.docker_image,
-                    name=container_name,
-                    detach=True,
-                    ports={target_port: port},  # Map the image's exposed port to the host port
-                    network='ctf_challenges',  # Connect to challenge network
-                    environment=env_vars,
-                    labels={
-                        'ctf.challenge_id': str(challenge_id),
-                        'ctf.user_id': str(user_id),
-                        'ctf.session_id': session_id
-                    },
-                    restart_policy={'Name': 'no'},
-                    remove=False
-                )
-                
-                # Update instance with actual container ID and running status
-                instance.container_id = container.id
-                instance.status = 'running'
-                instance.docker_info = {
-                    'short_id': container.short_id,
-                    'name': container.name,
-                    'image': challenge.docker_image
-                }
-                
-                # Debug logging for expiry time
-                current_app.logger.debug(
-                    f"Container started: {container.short_id} expires_at={instance.expires_at} "
-                    f"expires_at_ms={int(instance.expires_at.timestamp() * 1000)}"
-                )
-                
-                db.session.commit()
-                
-                # Log success event
-                self._log_event(instance.id, 'running', f'Container started on port {port}', event_type='start')
-                
-                # Inject dynamic flag if container exposes /flag.txt or challenge expects a flag file
-                try:
-                    # Determine path to write flag. ONLY inject if challenge explicitly configured a docker_flag_path.
-                    docker_flag_path = getattr(challenge, 'docker_flag_path', None)
-                    if challenge.docker_enabled and docker_flag_path and dynamic_flag:
-                        # Attempt to write flag into the container at the configured path
-                        injected = self._inject_flag_into_container(container, dynamic_flag, path=docker_flag_path)
-                        if injected:
-                            current_app.logger.info(f"Injected dynamic flag into container {container.short_id} at {docker_flag_path}")
-                        else:
-                            current_app.logger.warning(f"Failed to inject dynamic flag into container {container.short_id} at {docker_flag_path}")
-                    else:
-                        # No explicit path configured; do not generate or write a default /flag.txt to avoid overwriting
-                        # non-dynamic challenge data. Log at debug level for visibility.
-                        current_app.logger.debug(
-                            f"Skipping dynamic flag generation/injection for container {container.short_id}: no docker_flag_path configured on challenge {challenge.id}"
-                        )
-                except Exception as inject_err:
-                    current_app.logger.warning(f"Failed to inject dynamic flag into container: {inject_err}")
-
-                # Set rate limit in Redis
-                self._set_rate_limit(user_id, challenge_id)
-                
-                # Store container session in Redis
-                cache_service.set(
-                    f"container_session:{session_id}",
-                    {
-                        'container_id': container.id,
-                        'user_id': user_id,
-                        'challenge_id': challenge_id,
-                        'expires_at': instance.expires_at.isoformat()
-                    },
-                    ttl=settings.container_lifetime_minutes * 60
-                )
-                
-                # Build connection info
-                connection_info = self._build_connection_info(
-                    challenge, 
-                    instance.host_ip, 
-                    port
-                )
-                
-                current_app.logger.info(
-                    f"Container started: {container.short_id} for user {user_id} "
-                    f"challenge {challenge_id} on port {port}"
-                )
-                
-                return {
-                    'success': True,
-                    'status': 'running',
-                    'container': {
-                        **instance.to_dict(),
-                        'connection_info': connection_info
-                    }
-                }
-                
-            except docker.errors.ImageNotFound:
-                # Try to pull the image
-                current_app.logger.info(f"Pulling image: {challenge.docker_image}")
-                try:
-                    self.docker_client.images.pull(challenge.docker_image)
-                    # Retry container creation after pull
-                    return self.start_container(challenge_id, user_id, ip_address, team_id)
-                except Exception as pull_error:
-                    instance.status = 'error'
-                    instance.error_message = f'Failed to pull image: {str(pull_error)}'
-                    db.session.commit()
-                    self._log_event(instance.id, 'error', instance.error_message, event_type='error')
-                    return {
-                        'success': False,
-                        'error': f'Docker image not found and pull failed: {str(pull_error)}'
-                    }
-            
-            except Exception as docker_error:
-                # Update instance status to error
-                instance.status = 'error'
-                instance.error_message = str(docker_error)
-                db.session.commit()
-                
-                self._log_event(instance.id, 'error', str(docker_error), event_type='error')
-                
-                current_app.logger.error(f"Failed to start container: {docker_error}")
-                
-                return {
-                    'success': False,
-                    'error': f'Failed to start container: {str(docker_error)}'
-                }
-        
-        except Exception as e:
-            current_app.logger.error(f"Container start error: {e}", exc_info=True)
-            return {
-                'success': False,
-                'error': f'Unexpected error: {str(e)}'
-            }
-    
-    def stop_container(self, challenge_id, user_id, force=False):
-        """Stop a running container"""
-        self._ensure_docker_client()
-        
-        try:
-            instance = ContainerInstance.query.filter_by(
-                challenge_id=challenge_id,
-                user_id=user_id,
-                status='running'
-            ).first()
-            
-            if not instance:
-                return {'success': False, 'error': 'No running container found'}
-            
-            # Check cooldown (unless force)
-            if not force and instance.last_revert_time:
-                settings = DockerSettings.get_config()
-                cooldown_end = instance.last_revert_time + timedelta(
-                    minutes=settings.revert_cooldown_minutes
-                )
-                if datetime.utcnow() < cooldown_end:
-                    remaining = (cooldown_end - datetime.utcnow()).total_seconds()
-                    return {
-                        'success': False,
-                        'error': f'Please wait {int(remaining)} seconds before stopping',
-                        'remaining_seconds': int(remaining)
-                    }
-            
-            # Stop Docker container
-            try:
-                if self.docker_client:
-                    container = self.docker_client.containers.get(instance.container_id)
-                    container.stop(timeout=10)
-                    container.remove()
-                    current_app.logger.info(f"Container stopped: {instance.container_id}")
-            except docker.errors.NotFound:
-                current_app.logger.warning(f"Container not found in Docker: {instance.container_id}")
-            except Exception as e:
-                current_app.logger.error(f"Failed to stop Docker container: {e}")
-            
-            # Update database
-            instance.status = 'stopped'
-            instance.stopped_at = datetime.utcnow()
-            db.session.commit()
-            
-            # Log event
-            self._log_event(instance.id, 'stopped', 'Container stopped by user', event_type='stop')
-            
-            # Clear Redis cache
-            if instance.session_id:
-                cache_service.delete(f"container_session:{instance.session_id}")
-                # Remove dynamic flag from cache if present
-                cache_service.delete(f"dynamic_flag:{instance.session_id}")
-            
-            return {'success': True, 'message': 'Container stopped successfully'}
-        
-        except Exception as e:
-            current_app.logger.error(f"Stop container error: {e}", exc_info=True)
-            return {'success': False, 'error': str(e)}
-    
     def revert_container(self, challenge_id, user_id, ip_address, team_id=None):
-        """Revert (restart) a container"""
-        self._ensure_docker_client()
-        
+        return self._launch_container(challenge_id, user_id, ip_address, team_id, revert=True)
+
+    def _launch_container(self, challenge_id, user_id, ip_address, team_id, *, revert):
+        container = None
         try:
-            # Stop existing container
-            stop_result = self.stop_container(challenge_id, user_id, force=True)
-            
-            if not stop_result['success']:
-                return stop_result
-            
-            # Update last revert time
-            instance = ContainerInstance.query.filter_by(
-                challenge_id=challenge_id,
-                user_id=user_id
-            ).order_by(ContainerInstance.started_at.desc()).first()
-            
-            if instance:
-                instance.last_revert_time = datetime.utcnow()
-                db.session.commit()
-            
-            # Start new container
-            return self.start_container(challenge_id, user_id, ip_address, team_id)
-        
-        except Exception as e:
-            current_app.logger.error(f"Revert container error: {e}", exc_info=True)
-            return {'success': False, 'error': str(e)}
-    
+            with self.lifecycle_transaction() as settings:
+                challenge = db.session.get(Challenge, challenge_id)
+                if not challenge:
+                    return {'success': False, 'error': 'Challenge not found'}
+                if not challenge.docker_enabled or not challenge.docker_image:
+                    return {'success': False, 'error': 'This challenge does not support containers'}
+                if not settings.is_image_allowed(challenge.docker_image):
+                    return {'success': False, 'error': 'This Docker image is not in the allowed repositories'}
+
+                self._ensure_docker_client()
+                if not self.docker_client:
+                    return self._docker_unavailable()
+
+                active = self._active_instances().order_by(ContainerInstance.id).with_for_update().all()
+                owned = [row for row in active if row.user_id == user_id]
+                existing = next((row for row in owned if row.challenge_id == challenge_id), None)
+                if revert:
+                    if not existing or existing.status != 'running':
+                        return {'success': False, 'error': 'No running container found'}
+                    cooldown = self._cooldown(existing, settings, 'reverting')
+                    if cooldown:
+                        return cooldown
+                    if not self._remove_instance(existing, 'Container reverted', event_type='revert'):
+                        return {'success': False, 'error': 'Failed to remove container for revert'}
+                    existing.last_revert_time = datetime.utcnow()
+                    active.remove(existing)
+                    owned.remove(existing)
+                elif existing:
+                    return {
+                        'success': False, 'error': 'You already have an instance for this challenge.',
+                        'status': existing.status, 'container': self._instance_data(existing),
+                        'existing_challenge_id': challenge_id,
+                    }
+
+                user_limit = settings.max_containers_per_user
+                if user_limit is not None and len(owned) >= user_limit:
+                    return {
+                        'success': False, 'error': 'You have reached your active instance limit.',
+                        'existing_challenge_id': owned[0].challenge_id if owned else None,
+                    }
+                global_limit = settings.max_concurrent_containers
+                if global_limit is not None and len(active) >= global_limit:
+                    return {'success': False, 'error': 'The server has reached its challenge instance limit.'}
+
+                ports = self._available_ports(settings, active)
+                if not ports:
+                    return self._no_ports()
+                previous = (ContainerInstance.query.filter_by(challenge_id=challenge_id, user_id=user_id)
+                            .order_by(ContainerInstance.last_revert_time.desc()).with_for_update().first())
+                now = datetime.utcnow()
+                session_id = uuid4().hex
+                instance = ContainerInstance(
+                    challenge=challenge, user_id=user_id, team_id=team_id, ip_address=ip_address,
+                    session_id=session_id, container_id=f'starting_{session_id}',
+                    container_name=f'ctf-challenge-user{user_id}-chal{challenge_id}-{session_id}',
+                    docker_image=challenge.docker_image, host_ip=self._get_docker_host(settings),
+                    port=ports[0], host_port=ports[0], status='starting',
+                    expires_at=now + timedelta(minutes=settings.container_lifetime_minutes),
+                    last_revert_time=previous.last_revert_time if previous else None,
+                )
+                db.session.add(instance)
+                db.session.flush()
+                self._log_event(instance, 'starting', 'Starting container', 'start')
+
+                flag = instance.get_expected_flag()
+                options = self._run_options(instance, settings, flag)
+                try:
+                    target_port = self._target_port(challenge.docker_image)
+                    for port in ports:
+                        instance.port = instance.host_port = port
+                        options['ports'] = {
+                            target_port: (current_app.config.get('CHALLENGE_BIND_ADDRESS', '0.0.0.0'), port),
+                        }
+                        try:
+                            container = self._run_with_pull(challenge.docker_image, options)
+                            break
+                        except docker.errors.APIError as error:
+                            if not self._port_conflict(error):
+                                raise
+                            self._remove_docker_container(instance.container_name)
+                    if container is None:
+                        instance.status = 'error'
+                        instance.error_message = self._no_ports()['error']
+                        self._log_event(instance, 'error', instance.error_message, 'error')
+                        return self._no_ports()
+
+                    instance.container_id = container.id
+                    if challenge.docker_flag_path and not self._inject_flag_into_container(
+                        container, flag, path=challenge.docker_flag_path,
+                    ):
+                        raise RuntimeError('Could not write the configured flag file')
+
+                    instance.status = 'running'
+                    instance.started_at = datetime.utcnow()
+                    instance.expires_at = instance.started_at + timedelta(minutes=settings.container_lifetime_minutes)
+                    instance.docker_info = {
+                        'short_id': container.short_id, 'name': container.name, 'image': challenge.docker_image,
+                    }
+                    self._log_event(instance, 'running', f'Container started on port {port}', 'start')
+                    result = {'success': True, 'status': 'running', 'container': self._instance_data(instance)}
+                except Exception as error:
+                    current_app.logger.exception('Failed to start challenge container')
+                    instance.status = 'error'
+                    try:
+                        self._remove_docker_container(instance.container_name, container)
+                        container = None
+                    except Exception:
+                        instance.status = 'stopping'
+                        current_app.logger.exception('Could not remove partial challenge container')
+                    instance.error_message = 'Failed to start container.'
+                    self._log_event(instance, instance.status, instance.error_message, 'error')
+                    return {'success': False, 'error': instance.error_message}
+            return result
+        except Exception:
+            if container is not None:
+                try:
+                    self._remove_docker_container(container.id, container)
+                except Exception:
+                    current_app.logger.exception('Could not remove container after transaction failure')
+            current_app.logger.exception('Container start error')
+            return {'success': False, 'error': 'Failed to start container.'}
+
+    def _run_options(self, instance, settings, flag):
+        options = {
+            'name': instance.container_name,
+            'detach': True,
+            'network': 'ctf_challenges',
+            'environment': {
+                'CTF_USER_ID': str(instance.user_id),
+                'CTF_CHALLENGE_ID': str(instance.challenge_id),
+                'CTF_SESSION_ID': instance.session_id,
+                'FLAG': flag,
+            },
+            'labels': {
+                'ctf.challenge_id': str(instance.challenge_id),
+                'ctf.user_id': str(instance.user_id),
+                'ctf.session_id': instance.session_id,
+            },
+            'restart_policy': {'Name': 'no'},
+            'pids_limit': 256,
+            'remove': False,
+        }
+        if settings.max_memory_mb and settings.max_memory_mb > 0:
+            options['mem_limit'] = f'{settings.max_memory_mb}m'
+        if settings.max_cpu_percent and settings.max_cpu_percent > 0:
+            options['nano_cpus'] = int(settings.max_cpu_percent * 10_000_000)
+        return options
+
+    def _target_port(self, image):
+        try:
+            return self._image_port(image)
+        except docker.errors.ImageNotFound:
+            self.docker_client.images.pull(image)
+            return self._image_port(image)
+
+    def _image_port(self, image):
+        config = self.docker_client.images.get(image).attrs.get('Config') or {}
+        target_port = next(iter(config.get('ExposedPorts') or {}), '80/tcp')
+        return target_port if '/' in target_port else f'{target_port}/tcp'
+
+    def _run_with_pull(self, image, options):
+        try:
+            return self.docker_client.containers.run(image, **options)
+        except docker.errors.ImageNotFound:
+            self.docker_client.images.pull(image)
+            return self.docker_client.containers.run(image, **options)
+
+    @staticmethod
+    def _port_conflict(error):
+        message = str(error).lower()
+        return 'port is already allocated' in message or 'address already in use' in message
+
+    @staticmethod
+    def _no_ports():
+        return {'success': False, 'error': 'No free ports in the configured challenge port range.'}
+
+    @staticmethod
+    def _docker_unavailable():
+        return {'success': False, 'error': 'Docker is not configured or unavailable. Please contact an administrator.'}
+
+    @staticmethod
+    def _cooldown(instance, settings, action):
+        if instance.last_revert_time:
+            end = instance.last_revert_time + timedelta(minutes=settings.revert_cooldown_minutes or 0)
+            seconds = math.ceil((end - datetime.utcnow()).total_seconds())
+            if seconds > 0:
+                return {
+                    'success': False, 'status': 'cooldown', 'remaining_seconds': seconds,
+                    'error': f'Please wait {seconds} seconds before {action}.',
+                }
+        return None
+
+    def _remove_docker_container(self, identifier, container=None):
+        try:
+            if container is None:
+                container = self.docker_client.containers.get(identifier)
+            container.remove(force=True)
+        except docker.errors.NotFound:
+            pass
+
+    def _remove_instance(self, instance, message, *, event_type='stop'):
+        identifier = instance.container_id
+        if identifier.startswith('starting_'):
+            identifier = instance.container_name
+        try:
+            self._remove_docker_container(identifier)
+        except docker.errors.DockerException:
+            current_app.logger.exception('Failed to remove challenge container %s', identifier)
+            return False
+        instance.status = 'stopped'
+        self._log_event(instance, 'stopped', message, event_type)
+        return True
+
+    def stop_container(self, challenge_id, user_id, force=False, *, on_solve=False, session_id=None):
+        try:
+            with self.lifecycle_transaction() as settings:
+                if on_solve and not settings.auto_cleanup_on_solve:
+                    return {'success': True}
+                query = self._active_instances().filter_by(challenge_id=challenge_id, user_id=user_id)
+                if session_id is not None:
+                    query = query.filter_by(session_id=session_id)
+                instance = query.with_for_update().first()
+                if not instance:
+                    return {'success': on_solve, 'error': 'No running container found'}
+                if not force:
+                    cooldown = self._cooldown(instance, settings, 'stopping')
+                    if cooldown:
+                        return cooldown
+                self._ensure_docker_client()
+                if not self.docker_client:
+                    return self._docker_unavailable()
+                if not self._remove_instance(instance, 'Container stopped after solve' if on_solve else 'Container stopped'):
+                    return {'success': False, 'error': 'Failed to stop container.'}
+                return {'success': True, 'message': 'Container stopped successfully'}
+        except Exception:
+            current_app.logger.exception('Container stop error')
+            return {'success': False, 'error': 'Failed to stop container.'}
+
+    def force_cleanup(self, user_id, challenge_id=None):
+        try:
+            with self.lifecycle_transaction():
+                query = self._active_instances().filter_by(user_id=user_id).filter(
+                    db.or_(ContainerInstance.status.in_(('starting', 'stopping')),
+                           ContainerInstance.expires_at <= datetime.utcnow()),
+                )
+                if challenge_id is not None:
+                    query = query.filter_by(challenge_id=challenge_id)
+                instances = query.with_for_update().all()
+                if not instances:
+                    return {'success': False, 'error': 'No expired or stuck containers found.', 'not_found': True}
+                self._ensure_docker_client()
+                if not self.docker_client:
+                    return self._docker_unavailable()
+                cleaned = sum(self._remove_instance(instance, 'Container cleaned up') for instance in instances)
+                if not cleaned:
+                    return {'success': False, 'error': 'Failed to clean up containers.'}
+                result = {'success': True, 'message': f'Cleaned up {cleaned} container(s).', 'cleaned_count': cleaned}
+                if cleaned != len(instances):
+                    result['errors'] = ['Some containers could not be removed.']
+                return result
+        except Exception:
+            current_app.logger.exception('Container cleanup error')
+            return {'success': False, 'error': 'Failed to clean up containers.'}
+
     def get_container_status(self, challenge_id, user_id):
-        """Get status of user's container for a challenge"""
-        self._ensure_docker_client()
-        
-        instance = ContainerInstance.query.filter_by(
-            challenge_id=challenge_id,
-            user_id=user_id
-        ).filter(
-            ContainerInstance.status.in_(['starting', 'running'])
-        ).first()
-        
+        instance = self._active_instances().filter_by(challenge_id=challenge_id, user_id=user_id).first()
         if not instance:
             return {'success': True, 'status': 'none', 'container': None}
-        
-        # DON'T check expiry here - let the reconciliation task handle cleanup
-        # This prevents timezone issues between server/client
-        # The client-side countdown will show expiry status
-        
-        # Debug logging
-        current_app.logger.debug(
-            f"Container status: {instance.container_name} expires_at_ms={instance.to_dict().get('expires_at_ms')}"
-        )
-        
-        # Build connection info
-        challenge = Challenge.query.get(challenge_id)
-        connection_info = self._build_connection_info(
-            challenge,
-            instance.host_ip,
-            instance.host_port
-        )
-        
+        return {'success': True, 'status': instance.status, 'container': self._instance_data(instance)}
+
+    def _instance_data(self, instance):
+        host = current_app.config.get('CHALLENGE_HOST') or instance.host_ip or self._get_docker_host()
         return {
-            'success': True,
-            'status': instance.status,
-            'container': {
-                **instance.to_dict(),
-                'connection_info': connection_info
-            }
+            **instance.to_dict(),
+            'host_ip': host,
+            'connection_info': self._build_connection_info(instance.challenge, host, instance.host_port),
         }
-    
+
     def cleanup_expired_containers(self):
-        """Clean up expired containers (called by scheduler)"""
-        self._ensure_docker_client()
-        
-        try:
-            expired = ContainerInstance.query.filter(
-                ContainerInstance.status == 'running',
-                ContainerInstance.expires_at < datetime.utcnow()
-            ).all()
+        """Entry point for scheduled expiration cleanup."""
+        from services.container_reconciliation import reconcile_containers
 
-            cleaned = 0
-            for instance in expired:
-                # Attempt to stop and remove the Docker container if possible, but do not let Docker errors
-                # prevent marking the instance as stopped in the database.
-                try:
-                    if self.docker_client and instance.container_id:
-                        try:
-                            container = self.docker_client.containers.get(instance.container_id)
-                            container.stop(timeout=10)
-                            container.remove()
-                            current_app.logger.info(f"Stopped and removed expired container in Docker: {instance.container_id}")
-                        except docker.errors.NotFound:
-                            current_app.logger.warning(f"Expired container not found in Docker: {instance.container_id}")
-                        except Exception as docker_err:
-                            current_app.logger.warning(f"Error stopping/removing expired container {instance.container_id}: {docker_err}")
-                except Exception as e:
-                    current_app.logger.error(f"Docker cleanup check failed for instance {instance.id}: {e}")
+        reconcile_containers(current_app._get_current_object(), expired_only=True)
 
-                # Always mark the instance as stopped and persist immediately so users can start a new container
-                try:
-                    instance.status = 'stopped'
-                    instance.stopped_at = datetime.utcnow()
-                    # Capture session id for cache cleanup (don't null IDs — columns are NOT NULL)
-                    sess = instance.session_id
-                    db.session.commit()
-                except Exception as db_err:
-                    current_app.logger.error(f"Failed to mark expired container instance {instance.id} as stopped: {db_err}")
-                    db.session.rollback()
-                    # Continue to attempt cache cleanup/logging even if DB update failed
-
-                # Remove cached session and dynamic flag if present
-                try:
-                    if sess:
-                        cache_service.delete(f"container_session:{sess}")
-                        cache_service.delete(f"dynamic_flag:{sess}")
-                except Exception:
-                    pass
-
-                # Log the expiration event
-                try:
-                    self._log_event(instance.id, 'expired', 'Container expired and cleaned up', event_type='expire')
-                except Exception:
-                    # ensure logging failures don't stop the loop
-                    pass
-
-                cleaned += 1
-
-            current_app.logger.info(f"Cleaned up {cleaned} expired containers")
-            
-        except Exception as e:
-            current_app.logger.error(f"Cleanup error: {e}", exc_info=True)
-    
-    def _get_docker_host(self):
-        """Get Docker host IP"""
-        settings = DockerSettings.get_config()
-        
+    def _get_docker_host(self, settings=None):
+        """Return the public hostname used in connection instructions."""
+        if current_app.config.get('CHALLENGE_HOST'):
+            return current_app.config['CHALLENGE_HOST']
+        settings = settings if settings is not None else DockerSettings.get_config()
         if settings.hostname:
-            # Extract hostname from tcp://host:port
-            host = settings.hostname.replace('tcp://', '').replace('https://', '').split(':')[0]
-            return host
-            
+            endpoint = settings.hostname
+            hostname = urlsplit(endpoint if '://' in endpoint else f'//{endpoint}').hostname
+            if hostname:
+                return hostname
         if has_request_context():
-            # If in a request context, use the host the client used to access us
-            return request.host.split(':')[0]
-        
-        # Use local hostname (often an internal container ID if running in docker)
-        import socket
+            return urlsplit(f'//{request.host}').hostname
         return socket.gethostname()
-    
-    def _get_available_port(self, settings):
-        """Get an available port in the configured range"""
-        # TOCTOU FIX: Lock running instances while reading used ports to prevent
-        # two concurrent calls from picking the same port.
-        used_ports = set()
-        instances = ContainerInstance.query.filter_by(status='running').with_for_update().all()
-        # Also include 'starting' instances to avoid conflicts with containers being provisioned
-        starting_instances = ContainerInstance.query.filter_by(status='starting').with_for_update().all()
-        for instance in instances + starting_instances:
-            if instance.host_port:
-                used_ports.add(instance.host_port)
-        
-        # Find available port
-        max_attempts = 100
-        for _ in range(max_attempts):
-            port = random.randint(settings.port_range_start, settings.port_range_end)
-            if port not in used_ports:
-                return port
-        
-        raise Exception("No available ports in range")
 
-    def _generate_dynamic_flag(self, challenge, team_id, user_id):
-        """Generate HMAC-based deterministic flag. Not stored — recomputed on verify."""
-        try:
+    def _available_ports(self, settings, active):
+        used_ports = {instance.host_port or instance.port for instance in active}
+        for container in self.docker_client.containers.list():
+            for bindings in (container.ports or {}).values():
+                for binding in bindings or ():
+                    used_ports.add(int(binding['HostPort']))
+        return [
+            port for port in range(max(1, settings.port_range_start), min(65535, settings.port_range_end) + 1)
+            if port not in used_ports
+        ]
 
-            prefix = 'CYS'
-            if challenge and getattr(challenge, 'flag', None) and '{' in challenge.flag:
-                try:
-                    prefix = challenge.flag.split('{', 1)[0]
-                except Exception:
-                    pass
-
-            flag = generate_hmac_flag(challenge.id, team_id, user_id, prefix)
-
-            # Keep the cache key so check_flag in challenge.py can look it up.
-            # We store the HMAC flag here instead of the old random base64 value.
-            if team_id:
-                identifier = f'team_{team_id}'
-            else:
-                identifier = f'user_{user_id}'
-            cache_key = f"dynamic_flag_mapping:{challenge.id}:{identifier}"
-            cache_service.set(cache_key, flag, ttl=86400)
-
-            return flag
-        except Exception as e:
-            current_app.logger.error(f"Failed to generate HMAC flag: {e}")
-            return None
-    
     @staticmethod
     def parse_dynamic_flag(flag_value):
-        """Parse a dynamic flag to extract challenge_id and team_id
-        
-        Returns: dict with 'challenge_id', 'team_id', 'is_valid' keys, or None if not a dynamic flag
-        """
-        try:
-            # Check basic braces
-            if not ('{' in flag_value and '}' in flag_value):
-                return None
+        """Resolve the owner of a signed or legacy flag for flag-abuse reporting."""
+        instance = ContainerInstance.from_signed_flag(flag_value)
+        if instance:
+            return {
+                'challenge_id': instance.challenge_id, 'user_id': instance.user_id,
+                'team_id': instance.team_id, 'is_valid': True, 'is_team_flag': False,
+            }
+        return parse_legacy_flag(flag_value)
 
-            inner = flag_value.split('{', 1)[1].rsplit('}', 1)[0]
-
-            # Try base64 payload decoding (covers both legacy and new formats)
-            import base64
-
-            b64_part = inner
-            padding = 4 - (len(b64_part) % 4)
-            if padding and padding != 4:
-                b64_part += '=' * padding
-
-            try:
-                decoded = base64.urlsafe_b64decode(b64_part).decode('utf-8')
-                parts = decoded.split(':')
-                # New format: challenge_id:team_<id>:rand  OR challenge_id:user_<id>:rand
-                if len(parts) == 3:
-                    # Determine whether third part is numeric (rand) or a date (legacy)
-                    challenge_id = int(parts[0])
-                    team_part = parts[1]
-                    third = parts[2]
-                    if third.isdigit():
-                        # New format
-                        if team_part.startswith('team_'):
-                            team_id = int(team_part.replace('team_', ''))
-                            return {
-                                'challenge_id': challenge_id,
-                                'team_id': team_id,
-                                'date': None,
-                                'is_valid': True,
-                                'is_team_flag': True
-                            }
-                        elif team_part.startswith('user_'):
-                            user_id = int(team_part.replace('user_', ''))
-                            return {
-                                'challenge_id': challenge_id,
-                                'team_id': None,
-                                'user_id': user_id,
-                                'date': None,
-                                'is_valid': True,
-                                'is_team_flag': False
-                            }
-                    else:
-                        # Legacy format: challengeid:team_part:date
-                        date = third
-                        if team_part.startswith('team_'):
-                            team_id = int(team_part.replace('team_', ''))
-                            return {
-                                'challenge_id': challenge_id,
-                                'team_id': team_id,
-                                'date': date,
-                                'is_valid': True,
-                                'is_team_flag': True
-                            }
-                        elif team_part.startswith('user_'):
-                            user_id = int(team_part.replace('user_', ''))
-                            return {
-                                'challenge_id': challenge_id,
-                                'team_id': None,
-                                'user_id': user_id,
-                                'date': date,
-                                'is_valid': True,
-                                'is_team_flag': False
-                            }
-            except Exception:
-                # Not base64 or failed decode; fall through
-                pass
-
-            # If not base64, return None (we no longer support unencoded new format)
-            return None
-        except Exception:
-            return None
-
-    def _inject_flag_into_container(self, container, flag_value, path='/flag.txt'):
-        """Write a small file into the running container at `path` containing the flag_value using put_archive.
-
-        This creates a tar archive in memory with the file and uses the Docker API to place it in the container.
-        """
-        try:
-            import io, tarfile
-            data = flag_value.encode('utf-8')
-            tarstream = io.BytesIO()
-
-            # Ensure parent directory exists inside the container so tar extraction can place the file
-            parent_dir = '/' + '/'.join(path.lstrip('/').split('/')[:-1]) if '/' in path.lstrip('/') else '/'
-            try:
-                if parent_dir and parent_dir != '/':
-                    # Use root to ensure permissions for creating dirs
-                    container.exec_run(['mkdir', '-p', parent_dir], user='0')
-            except Exception:
-                # Non-fatal: continue, extraction may still create parent dirs
-                pass
-
-            with tarfile.open(fileobj=tarstream, mode='w') as tar:
-                tarinfo = tarfile.TarInfo(name=path.lstrip('/'))
-                tarinfo.size = len(data)
-                # Use a permissive mode so non-root processes inside container can modify the file (rw-rw-rw-)
-                tarinfo.mode = 0o666
-                tarinfo.mtime = int(datetime.utcnow().timestamp())
-                tar.addfile(tarinfo, io.BytesIO(data))
-
-            tarstream.seek(0)
-            # Put archive at root so path is resolved
-            container.put_archive('/', tarstream)
-
-            # Ensure file permissions are set correctly inside the container
-            try:
-                container.exec_run(['chmod', '666', path], user='0')
-            except Exception:
-                # If chmod fails, ignore — best effort
-                pass
-
-            return True
-        except Exception as e:
-            current_app.logger.warning(f"Failed to write flag to container: {e}")
+    def _inject_flag_into_container(self, container, flag_value, path):
+        """Write the flag file at the configured absolute container path."""
+        flag_path = PurePosixPath(path)
+        if not flag_path.is_absolute() or not flag_path.name or '..' in flag_path.parts:
             return False
-    
-    def _build_connection_info(self, challenge, host_ip, port):
-        """Build connection info string with replacements"""
-        if not challenge.docker_connection_info:
-            return f"http://{host_ip}:{port}"
-        
-        # Replace placeholders
-        info = challenge.docker_connection_info
-        info = info.replace('{host}', host_ip)
-        info = info.replace('{port}', str(port))
-        
-        return info
-    
-    def _set_rate_limit(self, user_id, challenge_id):
-        """Set rate limit for container starts"""
-        key = f"container_rate_limit:{user_id}:{challenge_id}"
-        cache_service.set(key, 1, ttl=300)  # 5 minute cooldown
-    
-    def _log_event(self, instance_id, status, message, event_type='lifecycle', challenge_id=None, user_id=None, ip_address=None, container_id=None):
-        """Log container event"""
-        try:
-            # Get instance to extract challenge_id and user_id if not provided
-            if not challenge_id or not user_id:
-                instance = ContainerInstance.query.get(instance_id)
-                if instance:
-                    challenge_id = challenge_id or instance.challenge_id
-                    user_id = user_id or instance.user_id
-                    container_id = container_id or instance.container_id
-            
-            event = ContainerEvent(
-                container_instance_id=instance_id,
-                challenge_id=challenge_id,
-                user_id=user_id,
-                event_type=event_type,
-                status=status,
-                message=message,
-                ip_address=ip_address,
-                container_id=container_id,
-                timestamp=datetime.utcnow()
-            )
-            db.session.add(event)
-            db.session.commit()
-        except Exception as e:
-            current_app.logger.error(f"Failed to log container event: {e}")
-            # Don't let logging errors break the main flow
-            db.session.rollback()
-    
+
+        parent = str(flag_path.parent)
+        if parent != '/':
+            # An image may provide the destination directory without a mkdir executable.
+            try:
+                container.exec_run(['mkdir', '-p', parent], user='0')
+            except docker.errors.DockerException:
+                current_app.logger.debug('Could not create the flag directory in Docker', exc_info=True)
+
+        data = flag_value.encode()
+        tarstream = io.BytesIO()
+        with tarfile.open(fileobj=tarstream, mode='w') as archive:
+            file = tarfile.TarInfo(flag_path.name)
+            file.size = len(data)
+            file.mode = 0o666
+            archive.addfile(file, io.BytesIO(data))
+        return container.put_archive(parent, tarstream.getvalue())
+
+    @staticmethod
+    def _build_connection_info(challenge, host_ip, port):
+        host = f'[{host_ip}]' if ':' in host_ip and not host_ip.startswith('[') else host_ip
+        template = challenge.docker_connection_info or 'http://{host}:{port}'
+        return template.replace('{host}', host).replace('{port}', str(port))
+
+    @staticmethod
+    def _log_event(instance, status, message, event_type):
+        db.session.add(ContainerEvent(
+            container_instance=instance,
+            challenge_id=instance.challenge_id,
+            user_id=instance.user_id,
+            container_id=instance.container_id,
+            ip_address=instance.ip_address,
+            event_type=event_type,
+            status=status,
+            message=message,
+        ))
+
     def list_available_images(self):
         """List available Docker images"""
         self._ensure_docker_client()

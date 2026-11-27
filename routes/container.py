@@ -10,7 +10,6 @@ from models.container import ContainerInstance
 from models.challenge import Challenge
 from services.challenge_catalog import is_challenge_visible, visible_challenges_query
 from services.container_manager import container_orchestrator
-from datetime import datetime
 
 container_bp = Blueprint('container', __name__, url_prefix='/container')
 
@@ -47,10 +46,10 @@ def hide_container_limit_details(result):
 def start_container():
     """Start a Docker container for a challenge"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         challenge_id = data.get('challenge_id')
         
-        if not challenge_id:
+        if type(challenge_id) is not int or challenge_id < 1:
             return jsonify({'success': False, 'error': 'Missing challenge_id'}), 400
         error = container_access_error(challenge_id)
         if error:
@@ -85,10 +84,10 @@ def start_container():
 def stop_container():
     """Stop a running container"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         challenge_id = data.get('challenge_id')
         
-        if not challenge_id:
+        if type(challenge_id) is not int or challenge_id < 1:
             return jsonify({'success': False, 'error': 'Missing challenge_id'}), 400
         error = container_access_error(challenge_id)
         if error:
@@ -116,10 +115,10 @@ def stop_container():
 def revert_container():
     """Revert (restart) a container"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         challenge_id = data.get('challenge_id')
         
-        if not challenge_id:
+        if type(challenge_id) is not int or challenge_id < 1:
             return jsonify({'success': False, 'error': 'Missing challenge_id'}), 400
         error = container_access_error(challenge_id)
         if error:
@@ -155,7 +154,7 @@ def get_status():
     try:
         challenge_id = request.args.get('challenge_id', type=int)
         
-        if not challenge_id:
+        if type(challenge_id) is not int or challenge_id < 1:
             return jsonify({'success': False, 'error': 'Missing challenge_id'}), 400
         error = container_access_error(challenge_id)
         if error:
@@ -180,28 +179,14 @@ def get_status():
 def list_my_containers():
     """List all containers for current user"""
     try:
-        containers = ContainerInstance.query.filter_by(
-            user_id=current_user.id, team_id=current_user.team_id,
-        ).filter(
-            ContainerInstance.status.in_(['starting', 'running']),
-            ContainerInstance.challenge_id.in_(visible_challenges_query(current_user).with_entities(Challenge.id)),
+        containers = container_orchestrator._active_instances().filter_by(user_id=current_user.id).filter(
+            ContainerInstance.challenge_id.in_(visible_challenges_query(current_user).with_entities(Challenge.id))
         ).all()
-        
-        result = []
-        for container in containers:
-            challenge = container.challenge
-            connection_info = container_orchestrator._build_connection_info(
-                challenge,
-                container.host_ip,
-                container.host_port
-            ) if challenge and challenge.docker_connection_info else None
-            
-            result.append({
-                **container.to_dict(),
-                'challenge_name': challenge.name if challenge else 'Unknown',
-                'connection_info': connection_info
-            })
-        
+        result = [
+            {**container_orchestrator._instance_data(instance), 'challenge_name': instance.challenge.name}
+            for instance in containers
+        ]
+
         return jsonify({
             'success': True,
             'containers': result
@@ -217,85 +202,17 @@ def list_my_containers():
 @container_bp.route('/force-cleanup', methods=['POST'])
 @login_required
 def force_cleanup():
-    """
-    Force cleanup of user's expired/stuck containers.
-    Removes DB records and attempts to stop/remove Docker containers.
-    """
-    try:
-        data = request.get_json() or {}
-        challenge_id = data.get('challenge_id')
-        
-        # Find containers to clean up
-        query = ContainerInstance.query.filter_by(user_id=current_user.id, team_id=current_user.team_id)
-        
-        if challenge_id:
-            error = container_access_error(challenge_id)
-            if error:
-                return error
-            query = query.filter_by(challenge_id=challenge_id)
-        else:
-            # Clean up expired/stopped containers only
-            query = query.filter(
-                db.or_(
-                    ContainerInstance.status.in_(['stopped', 'error']),
-                    ContainerInstance.expires_at < datetime.utcnow()
-                ),
-                ContainerInstance.challenge_id.in_(visible_challenges_query(current_user).with_entities(Challenge.id)),
-            )
-        
-        containers = query.all()
-        
-        if not containers:
-            return jsonify({
-                'success': False,
-                'error': 'No containers found to clean up'
-            }), 404
-        
-        cleaned_count = 0
-        errors = []
-        
-        # Ensure Docker client is available
-        container_orchestrator._ensure_docker_client()
-        
-        for container in containers:
-            try:
-                # Try to stop/remove from Docker if exists
-                if container_orchestrator.docker_client:
-                    try:
-                        docker_container = container_orchestrator.docker_client.containers.get(container.container_id)
-                        if docker_container.status == 'running':
-                            docker_container.stop(timeout=5)
-                        docker_container.remove(force=True)
-                    except Exception as docker_err:
-                        # Container might already be gone, that's okay
-                        pass
-                
-                # Remove from database
-                db.session.delete(container)
-                cleaned_count += 1
-                
-            except Exception as e:
-                errors.append(f"Container {container.id}: {str(e)}")
-        
-        db.session.commit()
-        
-        if cleaned_count > 0:
-            return jsonify({
-                'success': True,
-                'message': f'Cleaned up {cleaned_count} container(s)',
-                'cleaned_count': cleaned_count,
-                'errors': errors if errors else None
-            }), 200
-        else:
-            return jsonify({
-                'success': False,
-                'error': 'Failed to clean up containers',
-                'errors': errors
-            }), 500
-    
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({
-            'success': False,
-            'error': f'Server error: {str(e)}'
-        }), 500
+    """Retry removal of the current user's expired or stuck instances."""
+    data = request.get_json(silent=True) or {}
+    challenge_id = data.get('challenge_id')
+    if challenge_id is not None and (type(challenge_id) is not int or challenge_id < 1):
+        return jsonify({'success': False, 'error': 'Invalid challenge_id'}), 400
+    if challenge_id is not None:
+        error = container_access_error(challenge_id)
+        if error:
+            return error
+
+    result = container_orchestrator.force_cleanup(current_user.id, challenge_id)
+    if result['success']:
+        return jsonify(result), 200
+    return jsonify(result), 404 if result.get('not_found') else 400

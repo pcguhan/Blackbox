@@ -1,10 +1,17 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from models import db
+from utils.flag_hmac import (
+    dynamic_flag_prefix, flags_match, generate_hmac_flag, instance_flag_session,
+    is_instance_session, parse_legacy_flag,
+    verify_hmac_flag,
+)
 
 class ContainerInstance(db.Model):
     """Model for tracking active container instances"""
     __tablename__ = 'container_instances'
     
+    ACTIVE_STATUSES = ('starting', 'running', 'stopping')
+
     id = db.Column(db.Integer, primary_key=True)
     challenge_id = db.Column(db.Integer, db.ForeignKey('challenges.id'), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
@@ -58,7 +65,7 @@ class ContainerInstance(db.Model):
         
         expires_at_ms = None
         if self.expires_at:
-            expires_at_ms = int(self.expires_at.timestamp() * 1000)
+            expires_at_ms = int(self.expires_at.replace(tzinfo=timezone.utc).timestamp() * 1000)
         
         return {
             'id': self.id,
@@ -85,11 +92,11 @@ class ContainerInstance(db.Model):
     
     def is_expired(self):
         """Check if container has expired"""
-        return datetime.utcnow() > self.expires_at
+        return datetime.utcnow() >= self.expires_at
     
     def is_active(self):
         """Check if container is in an active state"""
-        return self.status in ['starting', 'running']
+        return self.status in self.ACTIVE_STATUSES
     
     def get_remaining_time(self):
         """Get remaining time in human-readable format"""
@@ -114,30 +121,60 @@ class ContainerInstance(db.Model):
         else:
             return f"{seconds}s"
     
+    @classmethod
+    def from_signed_flag(cls, flag):
+        session_id = instance_flag_session(flag)
+        if not session_id:
+            return None
+        instance = cls.query.filter_by(session_id=session_id).one_or_none()
+        if instance and verify_hmac_flag(
+            flag, instance.challenge_id, instance.team_id, instance.user_id,
+            dynamic_flag_prefix(instance.challenge), session_id=session_id,
+            case_sensitive=instance.challenge.flag_case_sensitive,
+        ):
+            return instance
+        return None
+
+    @classmethod
+    def find_flag_instance(cls, submitted, challenge, user_id, team_id):
+        if not user_id:
+            return None
+        if instance_flag_session(submitted):
+            instance = cls.from_signed_flag(submitted)
+            if (instance and instance.challenge_id == challenge.id
+                    and instance.user_id == user_id and instance.team_id == team_id
+                    and instance.status == 'running' and not instance.is_expired()):
+                return instance
+            return None
+
+        # Existing user-scoped flags can finish their original instance lifetime.
+        active = cls.query.filter_by(
+            challenge_id=challenge.id, user_id=user_id, team_id=team_id, status='running',
+        ).filter(cls.expires_at > datetime.utcnow()).all()
+        prefix = dynamic_flag_prefix(challenge)
+        legacy = parse_legacy_flag(submitted)
+        user_scoped = legacy and legacy['challenge_id'] == challenge.id and legacy['user_id'] == user_id
+        for instance in active:
+            stored = instance.dynamic_flag
+            if is_instance_session(instance.session_id) or not stored:
+                continue
+            if flags_match(stored, submitted, challenge.flag_case_sensitive) and (
+                user_scoped or verify_hmac_flag(
+                    submitted, challenge.id, None, user_id, prefix,
+                    case_sensitive=challenge.flag_case_sensitive,
+                )
+            ):
+                return instance
+        return None
+
     def get_expected_flag(self):
-        """Get the expected dynamic flag for this container from cache or DB"""
-        from services.cache import cache_service
-        
-        # First try DB column
-        if self.dynamic_flag:
-            return self.dynamic_flag
-        
-        # Fallback to cache (legacy)
-        cache_key = f"dynamic_flag:{self.session_id}"
-        cached_flag = cache_service.get(cache_key)
-        if cached_flag:
-            return cached_flag
-        
-        # Try mapping cache (team-based)
-        if self.team_id:
-            team_part = f'team_{self.team_id}'
-        else:
-            team_part = f'user_{self.user_id}'
-        
-        mapping_key = f"dynamic_flag_mapping:{self.challenge_id}:{team_part}"
-        mapped_flag = cache_service.get(mapping_key)
-        return mapped_flag
-    
+        """Return the issued flag for the admin diagnostic endpoint."""
+        if is_instance_session(self.session_id):
+            return generate_hmac_flag(
+                self.challenge_id, self.team_id, self.user_id,
+                dynamic_flag_prefix(self.challenge), session_id=self.session_id,
+            )
+        return self.dynamic_flag
 
 
 class ContainerEvent(db.Model):

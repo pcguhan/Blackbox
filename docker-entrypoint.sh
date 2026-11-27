@@ -98,12 +98,10 @@ echo -e "${GREEN}  Docker schema check complete${NC}"
 exec gunicorn \
     --config gunicorn.conf.py \
     --bind 0.0.0.0:8000 \
-    --workers "${WORKERS:-4}" \
     --timeout 120 \
     --access-logfile "${ACCESS_LOG:--}" \
     --error-logfile "${ERROR_LOG:--}" \
     --log-level info \
     --max-requests 10000 \
     --max-requests-jitter 500 \
-    --preload \
-    "app:create_app()"
+    "app:app"

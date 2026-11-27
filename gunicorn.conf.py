@@ -1,5 +1,4 @@
 # Gunicorn configuration file
-import multiprocessing
 import os
 
 # Server socket
@@ -7,8 +6,9 @@ bind = "0.0.0.0:8000"
 backlog = 2048
 
 # Worker processes 
-workers = int(os.getenv('WORKERS', max(8, multiprocessing.cpu_count() * 2)))
-worker_class = 'gevent'  
+# Socket.IO sessions are held in worker memory.
+workers = int(os.getenv('WORKERS', '1'))
+worker_class = 'geventwebsocket.gunicorn.workers.GeventWebSocketWorker'
 worker_connections = 2000  
 timeout = 300 
 keepalive = 10  
@@ -36,7 +36,7 @@ tmp_upload_dir = None
 # certfile = None
 
 # Performance
-preload_app = True
+preload_app = False
 max_requests = 50000  
 max_requests_jitter = 5000 
 
