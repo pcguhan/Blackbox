@@ -21,6 +21,7 @@
                 </p>
                 
                 <form method="POST">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <div class="mb-3">
                         <label for="invite_code" class="form-label">
                             <i class="bi bi-key-fill"></i> Invite Code

@@ -13,6 +13,7 @@
             <h2><i class="bi bi-shield-exclamation"></i> Flag Sharing Detection</h2>
             <form method="POST" action="{{ url_for('admin.clear_all_flag_abuse') }}" 
                   onsubmit="return confirm('Are you sure you want to clear all flag abuse records?');">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn btn-danger btn-sm">
                     <i class="bi bi-trash"></i> Clear All Records
                 </button>
@@ -238,6 +239,7 @@
                                           action="{{ url_for('admin.delete_flag_abuse_attempt', attempt_id=attempt.id) }}"
                                           style="display: inline;"
                                           onsubmit="return confirm('Delete this record?');">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                         <button type="submit" class="btn btn-sm btn-outline-danger">
                                             <i class="bi bi-trash"></i>
                                         </button>
