@@ -61,49 +61,15 @@ class Challenge(db.Model):
                            cascade='all, delete-orphan')
     
     def get_current_points(self):
-        """Calculate current points based on number of solves"""
-        if not self.is_dynamic:
-            return self.initial_points
-        
-        solve_count = self.solves.count()
-        if solve_count == 0:
-            return self.initial_points
-        
-        # Import here to avoid circular imports
-        import math
-        from flask import current_app
-        from models.settings import Settings
-        
-        if solve_count >= self.decay_solves:
-            return self.minimum_points
-        
-        # Get decay function from Settings or config
-        decay_function = Settings.get('decay_function', 'string')
-        if not decay_function:
-            decay_function = current_app.config.get('DECAY_FUNCTION', 'logarithmic')
-        
-        max_points = self.initial_points
-        min_points = self.minimum_points
-        decay = self.decay_solves
-        
-        if decay_function == 'parabolic':
-            # Parabolic decay (CTFd-style)
-            # Formula: value = (((minimum - initial) / (decay²)) * (solves²)) + initial
-            points = (((min_points - max_points) / (decay ** 2)) * (solve_count ** 2)) + max_points
-            points = math.ceil(points)
-        else:
-            # Logarithmic decay (default)
-            # Smooth, gradual decrease
-            points = max_points - (max_points - min_points) * \
-                     (math.log(solve_count + 1) / math.log(decay + 1))
-            points = int(points)
-        
-        return max(points, min_points)
-    
+        """Return the same challenge value used to calculate standings."""
+        from services.scoring import ScoringService
+        return ScoringService.calculate_dynamic_points(self)
+
     def get_solves_count(self):
-        """Get number of solves (excludes manual adjustments)"""
-        return self.solves.filter(db.text('challenge_id IS NOT NULL')).count()
-    
+        """Count participant solves for this challenge across recorded owners."""
+        from models.submission import Solve
+        return Solve.participant_solves().filter(Solve.challenge_id == self.id).count()
+
     def get_submissions_count(self):
         """Get total number of submissions"""
         return self.submissions.count()

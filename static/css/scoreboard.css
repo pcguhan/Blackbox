@@ -1,0 +1,80 @@
+.leaderboard-stage {
+    background: rgba(var(--panel-rgb), .76);
+}
+
+.your-standing {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem 2rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-inline-start: 3px solid var(--accent);
+    padding: 1rem 1.25rem;
+    margin-block-end: 1.25rem;
+}
+
+.your-standing[hidden] {
+    display: none;
+}
+
+.your-standing h2 {
+    color: var(--muted);
+    font-size: .875rem;
+    margin-block-end: .25rem;
+}
+
+#yourEntrant {
+    color: var(--ink);
+    font-weight: 600;
+}
+
+.standing-metrics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem clamp(1rem, 5vw, 3rem);
+    margin: 0;
+}
+
+.standing-metrics dt,
+.scoreboard-table .member-roll {
+    color: var(--muted);
+    font-size: .875rem;
+}
+
+.standing-metrics dd {
+    margin: 0;
+    color: var(--ink);
+    font-size: 1.125rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.scoreboard-table td.first-bloods-cell {
+    color: var(--secondary);
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+.team-roster {
+    margin-block-start: .25rem;
+    font-size: .875rem;
+    color: var(--muted);
+}
+
+.team-roster summary {
+    width: fit-content;
+    cursor: pointer;
+    color: var(--accent);
+}
+
+.team-roster ul {
+    margin: .5rem 0 0 0;
+    padding-inline-start: 1rem;
+    color: var(--ink);
+}
+
+.team-roster .member-roll {
+    display: inline-block;
+    margin-inline-start: .5rem;
+}

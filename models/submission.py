@@ -59,6 +59,7 @@ class Solve(db.Model):
     
     # Solve details
     points_earned = db.Column(db.Integer, nullable=False)  # Points at time of solve (for reference/manual adjustments)
+    base_points_override = db.Column(db.Integer, nullable=True)  # Fixed flag award at solve time
     solve_time = db.Column(db.Integer)  # Time taken in seconds (if tracked)
     is_first_blood = db.Column(db.Boolean, default=False)  # First solve of this challenge
     
@@ -71,40 +72,29 @@ class Solve(db.Model):
         db.UniqueConstraint('team_id', 'challenge_id', name='unique_team_challenge'),
     )
     
+    @classmethod
+    def participant_solves(cls):
+        """Exclude legacy admin activity while retaining team-owned records."""
+        from models.user import User
+
+        return cls.query.outerjoin(User, cls.user_id == User.id).filter(
+            db.or_(cls.team_id.is_not(None), User.is_admin.is_not(True))
+        )
+
     def get_current_points(self):
-        """Get current point value for this solve
-        
-        For dynamic challenges: Recalculate based on current challenge value
-        For static challenges: Use stored points_earned
-        For manual adjustments (challenge_id=None): Use stored points_earned
-        """
-        if self.challenge_id is None:
-            # Manual adjustment - use stored value
+        """Calculate a dynamic award or return stored static/adjustment points."""
+        if self.team_id is None and self.user and self.user.is_admin:
+            return 0
+        if not self.challenge or not self.challenge.is_dynamic:
             return self.points_earned
-        
-        from models.challenge import Challenge
-        challenge = Challenge.query.get(self.challenge_id)
-        
-        if not challenge:
-            # Challenge deleted - use stored value
-            return self.points_earned
-        
-        if not challenge.is_dynamic:
-            # Static challenge - use stored value
-            return self.points_earned
-        
-        # Dynamic challenge - recalculate based on current value
+
         from services.scoring import ScoringService
-        current_points = ScoringService.calculate_dynamic_points(challenge)
-        
-        # Add first blood bonus if enabled
-        if self.is_first_blood:
-            from models.settings import Settings
-            first_blood_bonus = Settings.get('first_blood_bonus', 0, type='int')
-            current_points += first_blood_bonus
-        
-        return current_points
-    
+        base_points = ScoringService.calculate_dynamic_points(self.challenge)
+        return ScoringService.solve_award(
+            base_points, self.base_points_override, self.is_first_blood,
+            ScoringService.first_blood_bonus(),
+        )
+
     def to_dict(self):
         """Convert solve to dictionary"""
         return {

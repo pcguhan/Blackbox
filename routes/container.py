@@ -9,6 +9,7 @@ from models import db
 from models.container import ContainerInstance
 from models.challenge import Challenge
 from services.challenge_catalog import is_challenge_visible, visible_challenges_query
+from models.settings import DockerSettings, Settings
 from services.container_manager import container_orchestrator
 
 container_bp = Blueprint('container', __name__, url_prefix='/container')
@@ -56,7 +57,7 @@ def start_container():
             return error
         
         # Get user's team (if any)
-        team = current_user.get_team()
+        team = current_user.get_team() if Settings.get('teams_enabled', True, type='bool') else None
         team_id = team.id if team else None
         
         # Start container
@@ -125,7 +126,7 @@ def revert_container():
             return error
         
         # Get user's team (if any)
-        team = current_user.get_team()
+        team = current_user.get_team() if Settings.get('teams_enabled', True, type='bool') else None
         team_id = team.id if team else None
         
         result = hide_container_limit_details(container_orchestrator.revert_container(

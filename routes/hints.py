@@ -4,6 +4,10 @@ from models import db
 from models.hint import Hint, HintUnlock
 from models.challenge import Challenge
 from services.challenge_catalog import is_challenge_visible, participant_scope
+from models.user import User
+from models.team import Team
+from services.cache import cache_service
+from services.standings import publish_standings, team_standings_enabled
 
 hints_bp = Blueprint('hints', __name__, url_prefix='/hints')
 
@@ -23,6 +27,10 @@ def get_challenge_hints(challenge_id):
 
     if not is_challenge_visible(challenge, current_user):
         return jsonify(success=False, message='Challenge not found'), 404
+
+    # Get user's team (needed for unlock checks)
+    team = current_user.get_team() if team_standings_enabled() else None
+    team_id = team.id if team else None
 
     hints = Hint.query.filter_by(challenge_id=challenge_id).order_by(Hint.order).all()
     
@@ -55,13 +63,16 @@ def get_challenge_hints(challenge_id):
 @login_required
 def unlock_hint(hint_id):
     """Unlock a hint by paying the cost"""
+    if current_user.is_admin:
+        return jsonify({'success': False, 'message': 'Admins can preview hints from the challenge page.'}), 403
+
     hint = db.session.get(Hint, hint_id)
 
     if not hint or not is_challenge_visible(hint.challenge, current_user):
         return jsonify(success=False, message='Challenge not found'), 404
 
     challenge = hint.challenge
-    team = current_user.get_team()
+    team = current_user.get_team() if team_standings_enabled() else None
     team_id = team.id if team else None
 
     # TOCTOU FIX: Lock the Hint row to serialize concurrent unlock attempts.
@@ -117,7 +128,9 @@ def unlock_hint(hint_id):
 
         
         db.session.commit()
-        
+        cache_service.invalidate_scoring(challenge.id)
+        publish_standings()
+
         return jsonify({
             'success': True,
             'message': f'Hint unlocked for {hint.cost} points',
@@ -196,6 +209,8 @@ def admin_manage_hint(hint_id):
         try:
             db.session.delete(hint)
             db.session.commit()
+            cache_service.invalidate_scoring(hint.challenge_id)
+            publish_standings()
             return jsonify({'success': True, 'message': 'Hint deleted successfully'})
         except Exception as e:
             db.session.rollback()

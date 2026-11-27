@@ -38,6 +38,7 @@ class ScoreboardPerformance(unittest.TestCase):
             for decay in ['logarithmic', 'parabolic']:
                 Settings.set('decay_function', decay)
                 for team_based in [True, False]:
+                    Settings.set('teams_enabled', team_based, 'bool')
                     statements = []
                     def record(*args): statements.append(args[2])
                     event.listen(db.engine, 'before_cursor_execute', record)
@@ -49,7 +50,8 @@ class ScoreboardPerformance(unittest.TestCase):
                         event.remove(db.engine, 'before_cursor_execute', record)
                     self.assertLessEqual(len(statements), 8)
                     print(f'{decay} team={team_based}: {len(rows)} entries, {len(statements)} SQL queries, {elapsed:.3f}s')
-                    entrants = Team.query.filter_by(is_active=True).all() if team_based else User.query.filter_by(is_active=True).all()
+                    entrants = (Team.query.filter_by(is_active=True).all() if team_based
+                                else User.query.filter_by(is_active=True, is_admin=False).all())
                     expected = {}
                     old_start = perf_counter()
                     old_queries = []

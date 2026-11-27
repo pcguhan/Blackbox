@@ -1,8 +1,31 @@
 import math
+import re
+from collections import defaultdict
+
+from flask import current_app
+from models import db
 from models.challenge import Challenge
+from models.hint import HintUnlock
+from models.settings import Settings
 from models.submission import Solve
 from models.team import Team
 from models.user import User
+
+_ROLL_NUMBER = re.compile(r'\b\d{2}[A-Z]{3}\d{4}\b', re.IGNORECASE)
+
+
+def _member_identity(user):
+    if not getattr(user, 'google_sub', None):
+        return {'name': getattr(user, 'nickname', None) or user.username}
+
+    full_name = user.full_name or ''
+    match = _ROLL_NUMBER.search(full_name)
+    roll = (getattr(user, 'roll_number', None) or getattr(user, 'registration_number', None)
+            or getattr(user, 'reg_no', None) or (match.group() if match else None))
+    name = _ROLL_NUMBER.sub('', full_name)
+    name = ' '.join(name.replace('()', '').split())
+    return {'name': name or 'Team member', 'roll_number': roll.upper() if roll else None}
+
 
 class ScoringService:
     """Service for managing challenge scoring and calculations"""
@@ -29,15 +52,9 @@ class ScoringService:
         if solve_count >= challenge.decay_solves:
             return challenge.minimum_points
         
-        # Get decay function from Settings or config
-        from flask import current_app
-        from models.settings import Settings
-        
         if decay_function is None:
-            decay_function = Settings.get('decay_function', 'string')
-        if not decay_function:
-            decay_function = current_app.config.get('DECAY_FUNCTION', 'logarithmic')
-        
+            decay_function = ScoringService.decay_function()
+
         max_points = challenge.initial_points
         min_points = challenge.minimum_points
         decay = challenge.decay_solves
@@ -58,95 +75,109 @@ class ScoringService:
         return max(points, min_points)
     
     @staticmethod
-    def get_scoreboard(team_based=True, limit=None):
-        """
-        Get scoreboard with rankings
-        
-        Args:
-            team_based: If True, return team scores. If False, return individual scores
-            limit: Maximum number of entries to return
-        
-        Returns:
-            List of dictionaries with score information
-        """
-        from collections import defaultdict
-        from models import db
-        from models.hint import HintUnlock
-        from models.settings import Settings
+    def decay_function():
+        return Settings.get('decay_function', type='string') or current_app.config.get(
+            'DECAY_FUNCTION', 'logarithmic'
+        )
 
-        # Read scalar rows in bulk: no lazy relationships or per-entrant queries.
-        challenges = {c.id: c for c in Challenge.query.all()}
-        solves = db.session.query(Solve.user_id, Solve.team_id, Solve.challenge_id,
-                                  Solve.points_earned, Solve.is_first_blood, Solve.solved_at).all()
+    @staticmethod
+    def first_blood_bonus():
+        return max(0, Settings.get('first_blood_bonus', 0, type='int'))
+
+    @staticmethod
+    def solve_award(base_points, override, is_first_blood, bonus):
+        return (base_points if override is None else override) + (bonus if is_first_blood else 0)
+
+    @staticmethod
+    def get_challenge_solve_counts(team_based):
+        """Get solve counts by challenge for the selected competition mode."""
+        owner = Solve.team_id if team_based else Solve.user_id
+        solves = Solve.participant_solves().filter(Solve.challenge_id.is_not(None), owner.is_not(None))
+        if not team_based:
+            solves = solves.filter(User.is_admin.is_not(True))
+        return dict(solves.with_entities(
+            Solve.challenge_id, db.func.count(db.distinct(owner))
+        ).group_by(Solve.challenge_id))
+
+    @staticmethod
+    def team_rosters(users):
+        rosters = defaultdict(list)
+        admin_teams = set()
+        participant_teams = set()
+        for user in users:
+            if user.team_id is None:
+                continue
+            if user.is_admin:
+                admin_teams.add(user.team_id)
+            else:
+                participant_teams.add(user.team_id)
+                if user.is_active:
+                    rosters[user.team_id].append(_member_identity(user))
+        return rosters, admin_teams - participant_teams
+
+    @staticmethod
+    def get_scoreboard(team_based=True, limit=None):
+        """Return ranked teams or individual participants using bulk queries."""
+        challenges = {challenge.id: challenge for challenge in Challenge.query.all()}
+        solves = Solve.participant_solves().with_entities(
+            Solve.user_id, Solve.team_id, Solve.challenge_id, Solve.points_earned,
+            Solve.base_points_override, Solve.is_first_blood, Solve.solved_at,
+        ).all()
+
         counts = defaultdict(int)
         for solve in solves:
             if solve.challenge_id is not None:
                 counts[solve.challenge_id] += 1
-        decay = Settings.get('decay_function', 'string')
-        bonus = Settings.get('first_blood_bonus', 0, type='int')
-        values = {cid: ScoringService.calculate_dynamic_points(c, counts[cid], decay)
-                  for cid, c in challenges.items() if c.is_dynamic}
-        team_scores, user_scores = defaultdict(int), defaultdict(int)
-        team_counts, user_counts = defaultdict(int), defaultdict(int)
-        team_last, user_last = {}, {}
-        team_first, user_first = defaultdict(int), defaultdict(int)
-        for solve in solves:
-            if solve.challenge_id is not None and solve.is_first_blood:
-                team_first[solve.team_id] += 1
-                user_first[solve.user_id] += 1
-            points = values.get(solve.challenge_id, solve.points_earned)
-            if solve.challenge_id in values and solve.is_first_blood:
-                points += bonus
-            for owner, scores, totals, latest in (
-                (solve.team_id, team_scores, team_counts, team_last),
-                (solve.user_id, user_scores, user_counts, user_last),
-            ):
-                if owner is None:
-                    continue
-                scores[owner] += points
-                totals[owner] += int(solve.challenge_id is not None)
-                if solve.solved_at and (owner not in latest or solve.solved_at > latest[owner]):
-                    latest[owner] = solve.solved_at
-        # Keep team hint charges separate from individual hint charges.
-        for user_id, team_id, cost in db.session.query(
-                HintUnlock.user_id, HintUnlock.team_id, db.func.sum(HintUnlock.cost_paid)
-        ).group_by(HintUnlock.user_id, HintUnlock.team_id):
-            if team_id is not None:
-                team_scores[team_id] -= int(cost)
-            else:
-                user_scores[user_id] -= int(cost)
-        scoreboard = []
-        if team_based:
-            entrants = db.session.query(Team.id, Team.name, Team.affiliation).filter(Team.is_active.is_(True)).all()
-            for entrant in entrants:
-                last = team_last.get(entrant.id)
-                scoreboard.append(dict(id=entrant.id, name=entrant.name, affiliation=entrant.affiliation,
-                                       score=team_scores[entrant.id], solves=team_counts[entrant.id],
-                                       last_solve=last.isoformat() if last else None))
-        else:
-            # Preserve existing behaviour: team members inherit their team's score,
-            # but their solve count and tie-break timestamp remain individual.
-            team_ids = {row.id for row in db.session.query(Team.id)}
-            entrants = db.session.query(User.id, User.username, User.full_name, User.team_id).filter(User.is_active.is_(True)).all()
-            for entrant in entrants:
-                last = user_last.get(entrant.id)
-                score = (team_scores[entrant.team_id] if entrant.team_id in team_ids else 0) if entrant.team_id else user_scores[entrant.id]
-                scoreboard.append(dict(id=entrant.id, name=entrant.username, affiliation=entrant.full_name or '',
-                                       score=score, solves=user_counts[entrant.id],
-                                       last_solve=last.isoformat() if last else None))
-        scoreboard.sort(key=lambda entry: (-entry['score'], entry['last_solve'] or '9999', entry['id']))
+        decay = ScoringService.decay_function()
+        bonus = ScoringService.first_blood_bonus()
+        values = {cid: ScoringService.calculate_dynamic_points(challenge, counts[cid], decay)
+                  for cid, challenge in challenges.items() if challenge.is_dynamic}
 
-        # Add rankings
-        for rank, entry in enumerate(scoreboard, 1):
+        scores, totals, first_bloods = defaultdict(int), defaultdict(int), defaultdict(int)
+        latest = {}
+        for solve in solves:
+            owner = solve.team_id if team_based else solve.user_id
+            if owner is None:
+                continue
+            points = solve.points_earned
+            if solve.challenge_id in values:
+                points = ScoringService.solve_award(
+                    values[solve.challenge_id], solve.base_points_override, solve.is_first_blood, bonus
+                )
+            scores[owner] += points
+            if solve.challenge_id is not None:
+                totals[owner] += 1
+                first_bloods[owner] += int(bool(solve.is_first_blood))
+            if solve.solved_at and (owner not in latest or solve.solved_at > latest[owner]):
+                latest[owner] = solve.solved_at
+
+        cost_owner = HintUnlock.team_id if team_based else HintUnlock.user_id
+        costs = db.session.query(cost_owner, db.func.sum(HintUnlock.cost_paid))
+        if not team_based:
+            costs = costs.filter(HintUnlock.team_id.is_(None))
+        for owner, cost in costs.group_by(cost_owner):
+            scores[owner] -= int(cost)
+
+        users = User.query.order_by(User.id).all()
+        if team_based:
+            rosters, admin_teams = ScoringService.team_rosters(users)
+            entrants = [dict(id=team.id, name=team.name, affiliation=team.affiliation, members=rosters[team.id])
+                        for team in Team.query.filter_by(is_active=True)
+                        if team.id not in admin_teams]
+        else:
+            entrants = [dict(id=user.id, name=user.username, affiliation=user.full_name or '')
+                        for user in users if user.is_active and not user.is_admin]
+
+        for entry in entrants:
+            owner = entry['id']
+            last = latest.get(owner)
+            entry.update(score=scores[owner], solves=totals[owner], first_bloods=first_bloods[owner],
+                         last_solve=last.isoformat() if last else None)
+        entrants.sort(key=lambda entry: (-entry['score'], entry['last_solve'] or '9999', entry['id']))
+        for rank, entry in enumerate(entrants, 1):
             entry['rank'] = rank
-            entry['first_bloods'] = (team_first if team_based else user_first)[entry['id']]
-        
-        # Apply limit if specified
-        if limit:
-            scoreboard = scoreboard[:limit]
-        
-        return scoreboard
-    
+        return entrants[:limit] if limit is not None else entrants
+
     @staticmethod
     def get_challenge_statistics():
         """Get statistics for all challenges"""
@@ -176,7 +207,7 @@ class ScoringService:
         if not user:
             return None
         
-        solves = Solve.query.filter_by(user_id=user_id).all()
+        solves = Solve.participant_solves().filter(Solve.user_id == user_id, Solve.challenge_id.is_not(None)).all()
         
         progress = {
             'total_score': user.get_score(),
@@ -194,7 +225,8 @@ class ScoringService:
                 'challenge_name': solve.challenge.name,
                 'category': solve.challenge.category,
                 'docker_enabled': solve.challenge.docker_enabled,
-                'points_earned': solve.points_earned,
+                'points_earned': solve.get_current_points(),
+                'is_first_blood': solve.is_first_blood,
                 'solved_at': solve.solved_at.isoformat()
             })
         
@@ -207,7 +239,7 @@ class ScoringService:
         if not team:
             return None
         
-        solves = Solve.query.filter_by(team_id=team_id).all()
+        solves = Solve.participant_solves().filter(Solve.team_id == team_id, Solve.challenge_id.is_not(None)).all()
         
         progress = {
             'total_score': team.get_score(),
@@ -225,7 +257,8 @@ class ScoringService:
                 'challenge_id': solve.challenge_id,
                 'challenge_name': solve.challenge.name,
                 'category': solve.challenge.category,
-                'points_earned': solve.points_earned,
+                'points_earned': solve.get_current_points(),
+                'is_first_blood': solve.is_first_blood,
                 'solved_at': solve.solved_at.isoformat(),
                 'solved_by': solver.username if solver else 'Unknown'
             })
