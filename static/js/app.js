@@ -5,7 +5,7 @@ function fetchWithCSRF(url, options = {}) {
     const headers = new Headers(options.headers || {});
     const method = (options.method || 'GET').toUpperCase();
     if (new URL(url, location.href).origin === location.origin && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-        headers.set('X-CSRF-Token', getCSRFToken());
+        headers.set('X-CSRFToken', getCSRFToken());
     }
     return fetch(url, { ...options, headers });
 }
@@ -35,3 +35,12 @@ document.addEventListener('DOMContentLoaded', () => {
         new bootstrap.Popover(element, { container: 'body' });
     });
 });
+
+if (document.getElementById('userDropdown')) {
+    window.addEventListener('pagehide', event => {
+        if (event.persisted) document.documentElement.hidden = true;
+    });
+    window.addEventListener('pageshow', event => {
+        if (event.persisted) window.location.reload();
+    });
+}

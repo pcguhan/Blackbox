@@ -53,3 +53,10 @@ uploads/
 
 # OS
 Thumbs.db
+
+# Author-only challenge materials and local worktrees
+examples/docker-challenges/
+challenges/roman/
+scripts/import_roman_challenge.py
+**/SOLUTION.md
+.wt/

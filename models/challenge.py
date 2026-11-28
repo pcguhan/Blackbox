@@ -1,6 +1,5 @@
 from datetime import datetime
 from models import db
-from utils.flag_hmac import verify_hmac_flag
 
 class Challenge(db.Model):
     """Challenge model for CTF problems"""
@@ -62,118 +61,61 @@ class Challenge(db.Model):
                            cascade='all, delete-orphan')
     
     def get_current_points(self):
-        """Calculate current points based on number of solves"""
-        if not self.is_dynamic:
-            return self.initial_points
-        
-        solve_count = self.solves.count()
-        if solve_count == 0:
-            return self.initial_points
-        
-        # Import here to avoid circular imports
-        import math
-        from flask import current_app
-        from models.settings import Settings
-        
-        if solve_count >= self.decay_solves:
-            return self.minimum_points
-        
-        # Get decay function from Settings or config
-        decay_function = Settings.get('decay_function', 'string')
-        if not decay_function:
-            decay_function = current_app.config.get('DECAY_FUNCTION', 'logarithmic')
-        
-        max_points = self.initial_points
-        min_points = self.minimum_points
-        decay = self.decay_solves
-        
-        if decay_function == 'parabolic':
-            # Parabolic decay (CTFd-style)
-            # Formula: value = (((minimum - initial) / (decay²)) * (solves²)) + initial
-            points = (((min_points - max_points) / (decay ** 2)) * (solve_count ** 2)) + max_points
-            points = math.ceil(points)
-        else:
-            # Logarithmic decay (default)
-            # Smooth, gradual decrease
-            points = max_points - (max_points - min_points) * \
-                     (math.log(solve_count + 1) / math.log(decay + 1))
-            points = int(points)
-        
-        return max(points, min_points)
-    
+        """Return the same challenge value used to calculate standings."""
+        from services.scoring import ScoringService
+        return ScoringService.calculate_dynamic_points(self)
+
     def get_solves_count(self):
-        """Get number of solves (excludes manual adjustments)"""
-        return self.solves.filter(db.text('challenge_id IS NOT NULL')).count()
-    
+        """Count participant solves for this challenge across recorded owners."""
+        from models.submission import Solve
+        return Solve.participant_solves().filter(Solve.challenge_id == self.id).count()
+
     def get_submissions_count(self):
         """Get total number of submissions"""
         return self.submissions.count()
     
+    def has_generated_flag(self, flags=None):
+        """True when a Docker challenge uses per-instance flags (its stored flag is a generated seed)."""
+        import re
+        from models.branching import ChallengeFlag
+
+        if not self.docker_enabled:
+            return False
+        if flags is None:
+            flags = ChallengeFlag.query.filter_by(challenge_id=self.id).all()
+        return (
+            re.fullmatch(r'[^{]*\{[0-9a-f]{48}\}', self.flag or '') is not None
+            and not any(flag.flag_value == self.flag for flag in flags)
+        )
+
     def check_flag(self, submitted_flag, team_id=None, user_id=None):
         """Check if submitted flag is correct (checks all flags for this challenge)
         
         Args:
             submitted_flag: The flag string submitted by the user
             team_id: Optional team_id for dynamic flag validation
-            user_id: Optional user_id for dynamic flag validation (when not in a team)
+            user_id: The participant who owns the Docker instance, including on teams
         
         Returns:
             Flag object if match found, True for legacy flags, or None if no match
         """
         from models.branching import ChallengeFlag
-        from services.cache import cache_service
-        
-        # Get all flags for this challenge
+
+        if self.docker_enabled:
+            from models.container import ContainerInstance
+
+            instance = ContainerInstance.find_flag_instance(submitted_flag, self, user_id, team_id)
+            if instance:
+                return _DynamicFlagMatch(submitted_flag, self.flag_case_sensitive, instance.session_id)
+
         flags = ChallengeFlag.query.filter_by(challenge_id=self.id).all()
-        
-        # Check each flag (pass team_id and user_id for template-based flags)
+        if self.has_generated_flag(flags):
+            # Per-instance Docker flags only: never accept the stored seed or a static guess.
+            return None
         for flag in flags:
             if flag.check_flag(submitted_flag, team_id=team_id, user_id=user_id):
-                return flag  # Return the matching flag object
-        
-        # Check dynamic flags if docker is enabled
-        if self.docker_enabled and (team_id or user_id):
-            # Build the cache key for this team/user's dynamic flag
-            if team_id:
-                team_part = f'team_{team_id}'
-            elif user_id:
-                team_part = f'user_{user_id}'
-            else:
-                team_part = None
-            
-            if team_part:
-                cache_key = f"dynamic_flag_mapping:{self.id}:{team_part}"
-                expected_flag = cache_service.get(cache_key)
-                
-                if expected_flag:
-                    case_sens = getattr(self, 'flag_case_sensitive', True)
-                    flag_matched = verify_hmac_flag(submitted_flag, self.id, team_id, user_id)
-                    if not flag_matched:
-                        # Fallback: plain equality for flags generated before HMAC system
-                        flag_matched = (submitted_flag == expected_flag)
-                        if not flag_matched and not case_sens:
-                            flag_matched = (submitted_flag.lower() == expected_flag.lower())
-                    
-                    if flag_matched:
-                        # Return a lightweight Flag-like object instead of boolean True.
-                        # Downstream code expects an object with certain attributes
-                        # (e.g., id, is_regex, is_case_sensitive, flag_value, points_override,
-                        # unlocks_challenge_id). Returning a small object prevents
-                        # AttributeError/TypeError when attributes are accessed.
+                return flag
 
-                        class _DynamicFlagMatch:
-                            def __init__(self, value, case_sensitive):
-                                self.id = None
-                                self.is_regex = False
-                                # Use challenge-level case sensitivity as best-effort
-                                self.is_case_sensitive = case_sensitive
-                                self.flag_value = value
-                                self.points_override = None
-                                self.unlocks_challenge_id = None
-                                self.flag_label = None
-
-                        return _DynamicFlagMatch(submitted_flag, case_sens)
-        
         # Legacy support: check old flag column if no flags defined
         if not flags and self.flag:
             if self.flag_case_sensitive:
@@ -185,6 +127,20 @@ class Challenge(db.Model):
         
         return None
     
+    def check_docker_unlock_flag(self, submitted_flag, team_id, user_id):
+        """Check explicit path flags after the Docker challenge has been solved."""
+        from models.branching import ChallengeFlag
+        from utils.flag_hmac import is_hmac_flag, parse_legacy_flag
+
+        if is_hmac_flag(submitted_flag) or parse_legacy_flag(submitted_flag):
+            return None
+        if self.flag and submitted_flag.lower() == self.flag.lower():
+            return None
+        flags = ChallengeFlag.query.filter_by(challenge_id=self.id).filter(
+            ChallengeFlag.unlocks_challenge_id.isnot(None),
+        )
+        return next((flag for flag in flags if flag.check_flag(submitted_flag, team_id, user_id)), None)
+
     def is_solved_by_user(self, user_id):
         """Check if challenge is solved by user"""
         return self.solves.filter_by(user_id=user_id).first() is not None
@@ -306,3 +262,17 @@ class Challenge(db.Model):
     
     def __repr__(self):
         return f'<Challenge {self.name}>'
+
+
+class _DynamicFlagMatch:
+    """Flag attributes used by the submission and scoring flow."""
+    id = None
+    is_regex = False
+    points_override = None
+    unlocks_challenge_id = None
+    flag_label = None
+
+    def __init__(self, value, case_sensitive, container_session_id):
+        self.container_session_id = container_session_id
+        self.flag_value = value
+        self.is_case_sensitive = case_sensitive

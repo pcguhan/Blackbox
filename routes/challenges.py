@@ -1,5 +1,6 @@
 from flask import Blueprint, render_template, request, jsonify, flash, redirect, url_for, current_app
 from flask_login import login_required, current_user
+from sqlalchemy.exc import IntegrityError
 from models import db
 from models.challenge import Challenge
 from models.submission import Submission, Solve
@@ -7,9 +8,12 @@ from models.file import ChallengeFile
 from models.user import User
 from services.scoring import ScoringService
 from services.cache import cache_service
+from services.challenge_catalog import (
+    is_challenge_visible, participant_scope, unlocked_acts_for, visible_challenges_query,
+)
 from services.websocket import WebSocketService
 from utils.audit import log_audit_event
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 
 challenges_bp = Blueprint('challenges', __name__, url_prefix='/challenges')
@@ -18,6 +22,11 @@ challenges_bp = Blueprint('challenges', __name__, url_prefix='/challenges')
 # Blueprint-level exception handler to ensure AJAX calls get JSON errors
 @challenges_bp.errorhandler(Exception)
 def _handle_challenges_exception(error):
+    from werkzeug.exceptions import HTTPException
+
+    if isinstance(error, HTTPException):
+        return jsonify(success=False, message=error.name), error.code
+
     import traceback
     current_app.logger.error(f"Unhandled exception in challenges blueprint: {error}\n{traceback.format_exc()}")
     # Return JSON for AJAX/Fetch callers to avoid JSON.parse errors on HTML 500 pages
@@ -48,104 +57,34 @@ def list_challenges():
     
     # Check if team is required globally (only matters if teams are enabled)
     require_team = Settings.get('require_team_for_challenges', default=False, type='bool')
-    team = current_user.get_team()
+    team = current_user.get_team() if teams_enabled else None
     
     # If teams are enabled AND team is required globally and user is not in a team (and not admin), show message
     if teams_enabled and require_team and not team and not current_user.is_admin:
         flash('You must join a team to view and solve challenges. Please join or create a team first.', 'warning')
         return redirect(url_for('teams.list_teams'))
     
-    # Load all challenges that are either visible OR hidden but potentially unlockable
-    # Note: solves relationship is lazy='dynamic', so we can't eager load it
-    # We query both visible and hidden challenges, then filter by is_unlocked_for_user() later
-    
-    # Check if ACT system is enabled (optional feature)
     act_system_enabled = Settings.get('act_system_enabled', default=False, type='bool')
-    
-    try:
-        if act_system_enabled:
-            # ACT system enabled - order by act, category, name
-            challenges = Challenge.query.filter(
-                db.or_(
-                    Challenge.is_visible == True,
-                    Challenge.is_hidden == True  # Include hidden challenges (prerequisites, flag unlocks)
-                )
-            ).order_by(Challenge.act, Challenge.category, Challenge.name).all()
-        else:
-            # ACT system disabled - order by category, name only
-            challenges = Challenge.query.filter(
-                db.or_(
-                    Challenge.is_visible == True,
-                    Challenge.is_hidden == True
-                )
-            ).order_by(Challenge.category, Challenge.name).all()
-    except Exception as e:
-        # Fallback if ACT column doesn't exist or other error
-        current_app.logger.warning(f"Error loading challenges with ACT system: {e}")
-        act_system_enabled = False
-        challenges = Challenge.query.filter(
-            db.or_(
-                Challenge.is_visible == True,
-                Challenge.is_hidden == True
-            )
-        ).order_by(Challenge.category, Challenge.name).all()
-    
-    # Get unlocked ACTs for user/team (only if ACT system is enabled)
-    unlocked_acts = []
-    if act_system_enabled:
-        try:
-            from models.act_unlock import ActUnlock
-            unlocked_acts = ActUnlock.get_unlocked_acts(
-                user_id=current_user.id if not team else None,
-                team_id=team.id if team else None
-            )
-        except Exception as e:
-            # If ActUnlock doesn't work, disable ACT system
-            current_app.logger.warning(f"Error loading ACT unlocks: {e}")
-            act_system_enabled = False
-            unlocked_acts = []
-    
+    unlocked_acts = unlocked_acts_for(current_user) if act_system_enabled else []
+    category_order = (Challenge.category, Challenge.name)
+    order = (Challenge.act, *category_order) if act_system_enabled else category_order
+    challenges = visible_challenges_query(current_user).order_by(*order).all()
+
     # Batch check which challenges are solved (single query instead of N queries)
     # This is the key optimization - replaces N individual queries with 1 batch query
     challenge_ids = [c.id for c in challenges]
-    if team:
-        solved_ids = set(solve.challenge_id for solve in Solve.query.filter(
-            Solve.team_id == team.id,
-            Solve.challenge_id.in_(challenge_ids)
-        ).all())
-    else:
-        solved_ids = set(solve.challenge_id for solve in Solve.query.filter(
-            Solve.user_id == current_user.id,
-            Solve.challenge_id.in_(challenge_ids)
-        ).all())
-    
+    solved_ids = {
+        challenge_id for challenge_id, in db.session.query(Solve.challenge_id).filter(
+            participant_scope(Solve, current_user),
+            Solve.challenge_id.in_(challenge_ids),
+        )
+    }
+
     # Organize challenges by ACT, then by category within each ACT (or just by category if ACT system disabled)
     acts = {}
     for challenge in challenges:
-        # Get ACT name (only if ACT system enabled)
-        if act_system_enabled:
-            act_name = getattr(challenge, 'act', None) or 'Uncategorized'
-            
-            # Check if ACT is unlocked (skip if not, unless admin)
-            if not current_user.is_admin and act_name not in unlocked_acts:
-                continue
-        else:
-            # ACT system disabled - use single category
-            act_name = 'Challenges'
-        
-        # Check if challenge is enabled
-        if not current_user.is_admin and not challenge.is_enabled:
-            continue
+        act_name = (challenge.act or 'Uncategorized') if act_system_enabled else 'Challenges'
 
-        # Check if this specific challenge requires a team (only enforce if teams are enabled)
-        if teams_enabled and challenge.requires_team and not team and not current_user.is_admin:
-            continue  # Skip this challenge if it requires team and user has no team
-        
-        # Check if challenge is unlocked for user
-        locked = not challenge.is_unlocked_for_user(current_user.id, team.id if team else None)
-        if not current_user.is_admin and locked and (challenge.is_hidden or not challenge.is_visible):
-            continue  # Never disclose hidden challenges before they unlock.
-        
         # Initialize ACT dict if needed
         if act_name not in acts:
             acts[act_name] = {}
@@ -159,18 +98,17 @@ def list_challenges():
         
         challenge_data = challenge.to_dict(include_flag=False)
         challenge_data['solved'] = solved
-        challenge_data['locked'] = locked
-        if locked and not current_user.is_admin:
-            challenge_data['description'] = 'Complete the prerequisites to unlock this challenge.'
+        challenge_data['locked'] = False
         challenge_data['requires_team'] = challenge.requires_team
-        
-        # Add prerequisite info if locked
-        if challenge.unlock_mode == 'prerequisite':
-            missing = challenge.get_missing_prerequisites(current_user.id, team.id if team else None)
+
+        if current_user.is_admin:
+            missing = challenge.get_missing_prerequisites(current_user.id, current_user.team_id)
+            challenge_data['locked'] = bool(missing) or not challenge.is_unlocked_for_user(
+                current_user.id, current_user.team_id,
+            )
             if missing:
-                challenge_data['locked'] = True
                 challenge_data['missing_prerequisites'] = [c.name for c in missing]
-        
+
         acts[act_name][challenge.category].append(challenge_data)
     
     return render_template('challenges.html', 
@@ -184,42 +122,15 @@ def list_challenges():
 @login_required
 def view_challenge(challenge_id):
     """View challenge details"""
+    challenge = db.session.get(Challenge, challenge_id)
+    
     from models.settings import Settings
-    
-    challenge = Challenge.query.get_or_404(challenge_id)
-    
-    # Get user's team first (needed for unlock checks)
-    team = current_user.get_team()
-    team_id = team.id if team else None
-    
-    # Check if challenge is enabled
-    if not current_user.is_admin and not challenge.is_enabled:
-        flash('Challenge not found', 'error')
-        return redirect(url_for('challenges.list_challenges'))
+    if not is_challenge_visible(challenge, current_user):
+        return render_template('errors/404.html'), 404
 
-    # Check if challenge is unlocked for this specific user/team
-    # This handles both visible challenges and hidden/prerequisite/flag-unlocked challenges
-    if not current_user.is_admin:
-        if not challenge.is_unlocked_for_user(current_user.id, team_id):
-            flash('Challenge not found', 'error')
-            return redirect(url_for('challenges.list_challenges'))
-    
-    # Check if teams are enabled
-    teams_enabled = Settings.get('teams_enabled', default=True, type='bool')
-    
-    # Check if team is required (either globally or per-challenge) - only if teams are enabled
-    require_team_global = Settings.get('require_team_for_challenges', default=False, type='bool')
-    
-    if teams_enabled and (require_team_global or challenge.requires_team) and not team and not current_user.is_admin:
-        flash('You must be in a team to view this challenge. Please join or create a team first.', 'warning')
-        return redirect(url_for('teams.list_teams'))
-    
-    # Check if solved
-    if team:
-        solved = challenge.is_solved_by_team(team.id)
-    else:
-        solved = challenge.is_solved_by_user(current_user.id)
-    
+    team = current_user.get_team() if Settings.get('teams_enabled', True, type='bool') else None
+    solved = challenge.solves.filter(participant_scope(Solve, current_user)).first() is not None
+
     challenge_data = challenge.to_dict(include_flag=False)
     challenge_data['solved'] = solved
     challenge_data['requires_team'] = challenge.requires_team
@@ -232,16 +143,12 @@ def view_challenge(challenge_id):
     images_data = [{'url': img.get_download_url(), 'original_filename': img.original_filename, 'id': img.id} for img in challenge_images]
     
     # Get hints
-    from models.hint import Hint
+    from models.hint import Hint, HintUnlock
     hints = Hint.query.filter_by(challenge_id=challenge_id).order_by(Hint.order).all()
     hints_data = []
     for hint in hints:
-        # Check if unlocked
-        if team:
-            unlocked = hint.is_unlocked_by_team(team.id)
-        else:
-            unlocked = hint.is_unlocked_by_user(current_user.id)
-        
+        unlocked = hint.unlocks.filter(participant_scope(HintUnlock, current_user)).first() is not None
+
         hint_info = {
             'id': hint.id,
             'cost': hint.cost,
@@ -257,15 +164,15 @@ def view_challenge(challenge_id):
     # Check if challenge has branching (multiple paths)
     from models.branching import ChallengeFlag, ChallengeUnlock
     challenge_flags = ChallengeFlag.query.filter_by(challenge_id=challenge_id).all()
-    has_branching = len(challenge_flags) > 1
+    has_branching = (
+        any(flag.unlocks_challenge_id for flag in challenge_flags)
+        if challenge.docker_enabled else len(challenge_flags) > 1
+    )
     challenge_data['has_branching'] = has_branching
     
     # Get unlocked paths for this user/team
     unlocked_paths = []
     if solved and has_branching:
-        user_id = current_user.id
-        team_id = team.id if team else None
-        
         # Find all flags from THIS challenge that unlock other challenges
         unlocking_flags = ChallengeFlag.query.filter(
             ChallengeFlag.challenge_id == challenge_id,
@@ -278,21 +185,12 @@ def view_challenge(challenge_id):
                 ChallengeUnlock.unlocked_by_flag_id == flag.id
             )
             
-            if team_id:
-                unlock_query = unlock_query.filter(
-                    db.or_(
-                        ChallengeUnlock.user_id == user_id,
-                        ChallengeUnlock.team_id == team_id
-                    )
-                )
-            else:
-                unlock_query = unlock_query.filter(ChallengeUnlock.user_id == user_id)
-                
+            unlock_query = unlock_query.filter(participant_scope(ChallengeUnlock, current_user))
             unlock = unlock_query.first()
             
             if unlock:
                 unlocked_challenge = Challenge.query.get(flag.unlocks_challenge_id)
-                if unlocked_challenge:
+                if is_challenge_visible(unlocked_challenge, current_user):
                     unlocked_paths.append({
                         'challenge_name': unlocked_challenge.name,
                         'category': unlocked_challenge.category,
@@ -362,64 +260,14 @@ def submit_flag(challenge_id):
     """Submit a flag for a challenge"""
     from models.settings import Settings
     
-    # Check CTF status
-    ctf_status = Settings.get_ctf_status()
-    
-    if ctf_status == 'not_started':
-        start_time = Settings.get('ctf_start_time')
-        return jsonify({
-            'success': False, 
-            'message': f'CTF has not started yet. Starts at: {start_time.strftime("%Y-%m-%d %H:%M UTC") if start_time else "TBD"}'
-        }), 403
-    
-    if ctf_status == 'ended':
-        end_time = Settings.get('ctf_end_time')
-        return jsonify({
-            'success': False, 
-            'message': f'CTF has ended. Ended at: {end_time.strftime("%Y-%m-%d %H:%M UTC") if end_time else "Unknown"}'
-        }), 403
-    
-    if ctf_status == 'paused':
-        return jsonify({
-            'success': False, 
-            'message': 'CTF is currently paused by administrators. Please wait for it to resume.'
-        }), 403
-    
-    challenge = Challenge.query.get_or_404(challenge_id)
-    
-    # Get user's team first (needed for unlock checks)
-    team = current_user.get_team()
+    challenge = db.session.get(Challenge, challenge_id)
+    if not is_challenge_visible(challenge, current_user):
+        return jsonify(success=False, message='Challenge not found'), 404
+    # Admins may test flags at any time; tests never create solves or points.
+
+    team = current_user.get_team() if Settings.get('teams_enabled', True, type='bool') else None
     team_id = team.id if team else None
-    
-    # Check if challenge is unlocked for this specific user/team
-    if not current_user.is_admin:
-        if not challenge.is_unlocked_for_user(current_user.id, team_id):
-            return jsonify({'success': False, 'message': 'Challenge not found'}), 404
-    
-    # Check if challenge is enabled
-    if not challenge.is_enabled and not current_user.is_admin:
-        return jsonify({
-            'success': False, 
-            'message': 'This challenge is temporarily disabled. Please try again later.'
-        }), 403
-    
-    # Check if teams are enabled
-    teams_enabled = Settings.get('teams_enabled', default=True, type='bool')
-    
-    # Check if team is required for this challenge (only if teams are enabled)
-    if teams_enabled and challenge.requires_team and not team_id and not current_user.is_admin:
-        return jsonify({
-            'success': False, 
-            'message': 'You must be in a team to solve this challenge. Please join or create a team first.'
-        }), 403
-    
-    # Check global team requirement setting (only if teams are enabled)
-    if teams_enabled and Settings.get('require_team_for_challenges', default=False, type='bool') and not team_id and not current_user.is_admin:
-        return jsonify({
-            'success': False, 
-            'message': 'You must be in a team to solve challenges. Please join or create a team first.'
-        }), 403
-    
+
     submitted_flag = request.form.get('flag', '').strip()
     
     if not submitted_flag:
@@ -427,68 +275,65 @@ def submit_flag(challenge_id):
     
     
     
-    # PER-TEAM LOCK: scope serialization to this team/user + this challenge only,
-    # instead of the whole Challenge row, so unrelated teams' submissions for the
-    # same challenge stop queuing behind each other. NX+EX means it self-expires
-    # in 10s even if this request dies before finishing, so we don't need a
-    # try/finally to release it.
-    solve_lock_key = f"solve_lock:{challenge_id}:{team_id or current_user.id}"
-    if not cache_service.redis_client.set(solve_lock_key, "1", nx=True, ex=10):
-        return jsonify({
-            'success': False,
-            'message': 'Please wait a moment before resubmitting.'
-        }), 429
-    # TOCTOU FIX: Acquire row-level lock on the Challenge row BEFORE checking
-    # already_solved. This serializes concurrent flag submissions for the same
-    # challenge, preventing double-solve and double first-blood race conditions.
-    # The lock is held until the transaction commits or rolls back.
-    Challenge.query.with_for_update().get(challenge_id)
-    
-    # Check if already solved (by user or team) — now protected by the lock above
-    if team:
+    if current_user.is_admin:
+        correct = challenge.check_flag(submitted_flag, team_id=team_id, user_id=current_user.id) is not None
+        log_audit_event(user_id=current_user.id, team_id=team_id, action='ADMIN_TEST_FLAG',
+                        details={'challenge_id': challenge_id, 'is_correct': correct})
+        message = 'Correct flag (admin test, not scored)' if correct else 'Incorrect flag (admin test)'
+        return jsonify({'success': correct, 'message': message, 'test': True}), 200 if correct else 400
+
+    user_id = current_user.id
+    # Start a fresh DB transaction so MySQL's consistent reads see the previous
+    # transaction's solves after acquiring the challenge row lock.
+    db.session.rollback()
+    with cache_service.solve_lock(challenge_id, team_id, user_id) as acquired:
+        if not acquired:
+            return jsonify({'success': False, 'message': 'Please wait a moment before resubmitting.'}), 429
+        try:
+            return _submit_participant_flag(challenge_id, submitted_flag, team_id)
+        except IntegrityError as error:
+            detail = str(error.orig).lower()
+            if any(key in detail for key in ('unique_team_challenge', 'unique_user_challenge',
+                                             'solves.team_id, solves.challenge_id',
+                                             'solves.user_id, solves.challenge_id')):
+                return jsonify({'success': False, 'message': 'This challenge has already been solved'}), 400
+            raise
+        finally:
+            # Release the DB row before allowing another request past Redis.
+            db.session.rollback()
+
+
+def _submit_participant_flag(challenge_id, submitted_flag, team_id):
+    from models.settings import Settings
+
+    challenge = Challenge.query.filter_by(id=challenge_id).with_for_update().first_or_404()
+    team = current_user.get_team() if team_id else None
+    if team_id:
         already_solved = challenge.is_solved_by_team(team_id)
     else:
         already_solved = challenge.is_solved_by_user(current_user.id)
-    
+
     # Check if this challenge has branching flags (allows re-submission for different paths)
     from models.branching import ChallengeFlag
     challenge_flags = ChallengeFlag.query.filter_by(challenge_id=challenge_id).all()
     has_branching = len(challenge_flags) > 1
     
     # If already solved and challenge has no branching, reject submission
-    if already_solved and not has_branching:
+    if already_solved and (challenge.docker_enabled or not has_branching):
         return jsonify({'success': False, 'message': 'This challenge has already been solved'}), 400
     
     # Check max attempts limit (0 means unlimited)
+    attempts = Submission.query.filter(Submission.challenge_id == challenge_id, participant_scope(Submission, current_user))
     if challenge.max_attempts and challenge.max_attempts > 0:
-        if team_id:
-            # Count team's attempts for this challenge
-            team_attempts = Submission.query.filter_by(
-                challenge_id=challenge_id,
-                team_id=team_id
-            ).count()
-            
-            if team_attempts >= challenge.max_attempts:
-                return jsonify({
-                    'success': False,
-                    'message': f'Maximum attempts ({challenge.max_attempts}) reached for this challenge'
-                }), 400
-        else:
-            # Count user's attempts
-            user_attempts = Submission.query.filter_by(
-                challenge_id=challenge_id,
-                user_id=current_user.id
-            ).count()
-            
-            if user_attempts >= challenge.max_attempts:
-                return jsonify({
-                    'success': False,
-                    'message': f'Maximum attempts ({challenge.max_attempts}) reached for this challenge'
-                }), 400
+        if attempts.count() >= challenge.max_attempts:
+            return jsonify({
+                'success': False,
+                'message': f'Maximum attempts ({challenge.max_attempts}) reached for this challenge'
+            }), 400
     
     # Rate limiting check (prevent brute force)
     rate_limit_key = f'submissions:{current_user.id}:{challenge_id}'
-    is_allowed, remaining = cache_service.check_rate_limit(rate_limit_key, limit=10, window=60)
+    is_allowed, _ = cache_service.check_rate_limit(rate_limit_key, limit=10, window=60)
     
     if not is_allowed:
         return jsonify({
@@ -504,7 +349,6 @@ def submit_flag(challenge_id):
     if not is_correct and challenge.docker_enabled:
         from services.container_manager import ContainerOrchestrator
         from models.flag_abuse import FlagAbuseAttempt
-        from models.container import ContainerInstance
         
         parsed_flag = ContainerOrchestrator.parse_dynamic_flag(submitted_flag)
         if parsed_flag and parsed_flag.get('is_valid'):
@@ -533,51 +377,11 @@ def submit_flag(challenge_id):
                     # It's a user flag (no team) - the flag contains user_id
                     flag_user_id = flag_instance_id
                     
-                    # Check if the flag belongs to the current user
-                    if flag_user_id == current_user.id:
-                        # Verify the flag against the active container for this user/challenge
-                        # or check the cache mapping
-                        mapping_key = f"dynamic_flag_mapping:{challenge_id}:user_{flag_user_id}"
-                        mapping_flag = cache_service.get(mapping_key)
-                        
-                        # Also check active container if available (more reliable if cache expired but container running)
-                        instance = ContainerInstance.query.filter_by(
-                            user_id=current_user.id, 
-                            challenge_id=challenge_id,
-                            status='running'
-                        ).first()
-                        
-                        instance_flag = getattr(instance, 'dynamic_flag', None) if instance else None
-                        expected_flag = instance_flag or mapping_flag
-                        
-                        if expected_flag:
-                            case_sens = getattr(challenge, 'flag_case_sensitive', True)
-                            flag_matched = (submitted_flag == expected_flag)
-                            if not flag_matched and not case_sens:
-                                flag_matched = (submitted_flag.lower() == expected_flag.lower())
-                            
-                            if flag_matched:
-                                is_correct = True
-                                # Return a lightweight dynamic flag match object so downstream logic
-                                # (award points, create submission) works the same as Challenge.check_flag
-
-                                class _DynamicFlagMatch:
-                                    def __init__(self, value, case_sensitive):
-                                        self.id = None
-                                        self.is_regex = False
-                                        self.is_case_sensitive = case_sensitive
-                                        self.flag_value = value
-                                        self.points_override = None
-                                        self.unlocks_challenge_id = None
-                                        self.flag_label = None
-
-                                matched_flag = _DynamicFlagMatch(submitted_flag, case_sens)
-                            # else: Flag format valid but doesn't match expected flag for this user
-                    else:
-                        # Flag belongs to another user
+                    if flag_user_id != current_user.id or (flag_team_id and flag_team_id != team_id):
                         is_wrong_team = True
                         actual_owner_user_id = flag_user_id
-            
+                        actual_owner_team_id = flag_team_id
+
             # Log the flag sharing attempt
             if is_wrong_team:
                 # Validate that referenced entities exist (to avoid FK constraint errors)
@@ -668,18 +472,12 @@ def submit_flag(challenge_id):
     )
     db.session.add(submission)
     
-    log_audit_event(
-        user_id=current_user.id, 
-        team_id=team_id, 
-        action='SUBMIT_FLAG', 
-        details={'challenge_id': challenge_id, 'is_correct': is_correct}
-    )
-    
+    audit_details = {'challenge_id': challenge_id, 'is_correct': is_correct}
+
     if is_correct:
         # DETECT exact regex-based flag sharing (admin-controlled per-challenge)
         try:
             from models.flag_abuse import FlagAbuseAttempt
-            from datetime import timedelta, datetime
 
             # Only consider when this flag was matched via a regex flag and the challenge has monitoring enabled
             if hasattr(matched_flag, 'is_regex') and matched_flag.is_regex and getattr(challenge, 'detect_regex_sharing', False):
@@ -837,56 +635,29 @@ def submit_flag(challenge_id):
                         pass
         except Exception as e:
             current_app.logger.debug(f"Regex-sharing detection error: {e}")
-        # Calculate points at time of solve
-        from services.scoring import ScoringService
-        current_solve_count = challenge.get_solves_count()
-        points = ScoringService.calculate_dynamic_points(challenge, solve_count=current_solve_count)
-        
-        # Check if flag has a points override
-        if hasattr(matched_flag, 'points_override') and matched_flag.points_override:
-            points = matched_flag.points_override
-        
-        # Check if this is first blood (first solve of this challenge)
-        from models.settings import Settings
-        is_first_blood = False
-        first_blood_bonus = Settings.get('first_blood_bonus', 0, type='int')
-        
-        # NOTE: Challenge row is already locked via with_for_update() at the top of
-        # submit_flag(). Both the already_solved check and this first-blood check
-        # are serialized under that single lock — no separate lock needed here.
-        
-        existing_solves = Solve.query.filter_by(challenge_id=challenge_id).filter(
-            Solve.challenge_id != None  # Exclude manual adjustments
-        ).count()
-        
-        if existing_solves == 0:
-            is_first_blood = True
-            if first_blood_bonus > 0:
-                points += first_blood_bonus
-        
-        # Create solve record - marks challenge as solved for entire team
-        solve = Solve(
-            user_id=current_user.id,
-            challenge_id=challenge_id,
-            flag_id=matched_flag.id if hasattr(matched_flag, 'id') else None,
-            team_id=team_id,
-            points_earned=points,
-            is_first_blood=is_first_blood
-        )
-        db.session.add(solve)
-        
-        # Auto-stop container if challenge has one (cleanup after solve)
-        if challenge.docker_enabled:
-            try:
-                from services.container_manager import container_orchestrator
-                stop_result = container_orchestrator.stop_container(challenge_id, current_user.id, force=True)
-                if stop_result.get('success'):
-                    current_app.logger.info(f"Auto-stopped container for solved challenge {challenge_id} by user {current_user.id}")
-                else:
-                    current_app.logger.warning(f"Failed to auto-stop container for solved challenge {challenge_id}: {stop_result.get('error', 'Unknown error')}")
-            except Exception as e:
-                current_app.logger.error(f"Error auto-stopping container for solved challenge {challenge_id}: {e}")
-        
+        points = 0
+        if not already_solved:
+            solve_count = challenge.get_solves_count()
+            previous_points = ScoringService.calculate_dynamic_points(challenge, solve_count=solve_count)
+            is_first_blood = solve_count == 0
+            override = getattr(matched_flag, 'points_override', None)
+            base_points = ScoringService.calculate_dynamic_points(challenge, solve_count=solve_count + 1)
+            points = ScoringService.solve_award(
+                base_points, override, is_first_blood, ScoringService.first_blood_bonus()
+            )
+            db.session.add(Solve(
+                user_id=current_user.id,
+                challenge_id=challenge_id,
+                flag_id=getattr(matched_flag, 'id', None),
+                team_id=team_id,
+                points_earned=points,
+                base_points_override=override,
+                is_first_blood=is_first_blood,
+            ))
+            db.session.flush()
+        elif not getattr(matched_flag, 'unlocks_challenge_id', None):
+            return jsonify({'success': False, 'message': 'This challenge has already been solved'}), 400
+
         # Handle challenge unlocking via flags and prerequisites
         from models.branching import ChallengeUnlock, ChallengePrerequisite
         unlocked_challenges = []
@@ -894,34 +665,26 @@ def submit_flag(challenge_id):
         
         # Handle ACT unlocking if this challenge unlocks a new ACT (only if ACT system enabled)
         act_system_enabled = Settings.get('act_system_enabled', default=False, type='bool')
-        if act_system_enabled and challenge.unlocks_act:
+        if not already_solved and act_system_enabled and challenge.unlocks_act:
             from models.act_unlock import ActUnlock
-            act_unlocked = ActUnlock.unlock_act(
-                act=challenge.unlocks_act,
-                user_id=current_user.id if not team_id else None,
-                team_id=team_id,
-                challenge_id=challenge_id
-            )
-            if act_unlocked:
+
+            act_owner = None if team_id else current_user.id
+            if challenge.unlocks_act not in unlocked_acts_for(current_user):
+                db.session.add(ActUnlock(act=challenge.unlocks_act, user_id=act_owner, team_id=team_id,
+                                         unlocked_by_challenge_id=challenge_id))
                 unlocked_act = challenge.unlocks_act
-                current_app.logger.info(
-                    f"ACT {challenge.unlocks_act} unlocked for "
-                    f"{'team ' + str(team_id) if team_id else 'user ' + str(current_user.id)} "
-                    f"by solving challenge {challenge_id} ({challenge.name})"
-                )
-        
+
         # Check if solving this challenge unlocks any prerequisite-gated challenges
         prerequisite_dependents = ChallengePrerequisite.query.filter_by(
             prerequisite_challenge_id=challenge_id
-        ).all()
+        ).all() if not already_solved else []
         
         for dependent in prerequisite_dependents:
             dependent_challenge = dependent.challenge
             
             # Check if all prerequisites are now met for this dependent challenge
             if dependent_challenge.unlock_mode == 'prerequisite':
-                # Use the model's method to check if now unlocked
-                if dependent_challenge.is_unlocked_for_user(current_user.id, team_id):
+                if is_challenge_visible(dependent_challenge, current_user):
                     unlocked_challenges.append({
                         'id': dependent_challenge.id,
                         'name': dependent_challenge.name,
@@ -939,24 +702,17 @@ def submit_flag(challenge_id):
                 ChallengeUnlock.challenge_id == matched_flag.unlocks_challenge_id
             )
             
-            if team_id:
-                unlock_query = unlock_query.filter(
-                    db.or_(
-                        ChallengeUnlock.user_id == current_user.id,
-                        ChallengeUnlock.team_id == team_id
-                    )
-                )
-            else:
-                unlock_query = unlock_query.filter(ChallengeUnlock.user_id == current_user.id)
-                
+            unlock_query = unlock_query.filter(participant_scope(ChallengeUnlock, current_user))
+
             existing_unlock = unlock_query.first()
             
             if existing_unlock:
                 # Path already unlocked, inform user but don't create duplicate
                 unlocked_challenge = Challenge.query.get(matched_flag.unlocks_challenge_id)
+                name = unlocked_challenge.name if is_challenge_visible(unlocked_challenge, current_user) else 'this challenge'
                 return jsonify({
                     'success': False,
-                    'message': f'You have already unlocked the path to "{unlocked_challenge.name if unlocked_challenge else "this challenge"}" with a different flag.'
+                    'message': f'You have already unlocked the path to "{name}" with a different flag.'
                 }), 400
             
             # This flag unlocks another challenge - create unlock record (per-user/team)
@@ -974,9 +730,7 @@ def submit_flag(challenge_id):
             
             # Get the unlocked challenge details
             unlocked_challenge = Challenge.query.get(matched_flag.unlocks_challenge_id)
-            if unlocked_challenge:
-                # Do NOT modify is_hidden/is_visible - challenge stays hidden globally
-                # Visibility is controlled per-user/team via ChallengeUnlock + is_unlocked_for_user()
+            if is_challenge_visible(unlocked_challenge, current_user):
                 unlocked_challenges.append({
                     'id': unlocked_challenge.id,
                     'name': unlocked_challenge.name,
@@ -988,58 +742,49 @@ def submit_flag(challenge_id):
                     f"via flag {matched_flag.id}"
                 )
         
-        # Scores are automatically calculated from Solve records
-        # No need to update user.score or team.score (they don't exist as columns)
-        
-        try:
-            db.session.commit()
-        except Exception as commit_err:
-            db.session.rollback()
-            # Handle duplicate solve (race condition with concurrent submissions)
-            err_msg = str(commit_err).lower()
-            if 'unique' in err_msg or 'duplicate' in err_msg or 'integrity' in err_msg:
-                return jsonify({'success': False, 'message': 'This challenge has already been solved'}), 400
-            raise
-        
-        # Invalidate caches
-        cache_service.invalidate_scoreboard()
-        cache_service.invalidate_challenge(challenge_id)
-        if team_id:
-            cache_service.invalidate_team(team_id)
-        else:
-            cache_service.invalidate_user(current_user.id)
-        
-        # Emit WebSocket events for live updates
-        solve_data = {
-            'user': current_user.username,
-            'team': team.name if team else None,
-            'challenge': challenge.name,
-            'category': challenge.category,
-            'points': points,
-            'timestamp': datetime.utcnow().isoformat()
-        }
-        WebSocketService.emit_new_solve(solve_data)
-        
-        # Update challenge points (may have changed)
-        new_points = challenge.get_current_points()
-        if new_points != points:
-            WebSocketService.emit_challenge_update({
-                'id': challenge.id,
-                'name': challenge.name,
-                'points': new_points
+        db.session.commit()
+        audit_details.update(points=points, awarded_solve=not already_solved)
+        log_audit_event(user_id=current_user.id, team_id=team_id, action='SUBMIT_FLAG', details=audit_details)
+
+        cache_service.invalidate_scoring(challenge_id)
+        if not already_solved:
+            # Container cleanup can commit on its own and must follow the solve transaction.
+            if challenge.docker_enabled:
+                try:
+                    from services.container_manager import container_orchestrator
+                    result = container_orchestrator.stop_container(
+                        challenge_id, current_user.id, force=True, on_solve=True,
+                        session_id=getattr(matched_flag, 'container_session_id', None),
+                    )
+                    if not result.get('success'):
+                        current_app.logger.warning("Failed to auto-stop container for challenge %s: %s",
+                                                   challenge_id, result.get('error'))
+                except Exception:
+                    current_app.logger.exception("Error auto-stopping container for challenge %s", challenge_id)
+
+            # Hidden or branch-unlocked challenges are announced without their name or category.
+            public_challenge = challenge.is_visible and not challenge.is_hidden
+            WebSocketService.emit_new_solve({
+                'user': current_user.username,
+                'team': team.name if team else None,
+                'challenge': challenge.name if public_challenge else 'Hidden challenge',
+                'category': challenge.category if public_challenge else None,
+                'points': points,
+                'timestamp': datetime.utcnow().isoformat(),
             })
-        
-        # Send updated scoreboard (check if teams are enabled)
-        teams_enabled = Settings.get('teams_enabled', default=True, type='bool')
-        cache_key = 'scoreboard_team' if teams_enabled else 'scoreboard_individual'
-        scoreboard = ScoringService.get_scoreboard(team_based=teams_enabled, limit=100)
-        cache_service.set(cache_key, scoreboard, ttl=60)
-        WebSocketService.emit_scoreboard_update(scoreboard)
-        
-        message = 'Correct flag! Challenge solved!'
-        if team:
+            new_points = challenge.get_current_points()
+            if new_points != previous_points:
+                WebSocketService.emit_challenge_update({
+                    'id': challenge.id, 'name': challenge.name, 'points': new_points,
+                })
+
+            from services.standings import publish_standings
+            publish_standings()
+
+        message = 'Correct flag! Challenge solved!' if not already_solved else 'Correct flag!'
+        if team and not already_solved:
             message += f' Points awarded to team "{team.name}".'
-        
+
         # Add info about unlocked challenges
         response_data = {
             'success': True,
@@ -1050,7 +795,7 @@ def submit_flag(challenge_id):
         # Add ACT unlock notification
         if unlocked_act:
             response_data['unlocked_act'] = unlocked_act
-            response_data['message'] += f'{unlocked_act} has been unlocked!'
+            response_data['message'] += f' {unlocked_act} has been unlocked!'
         
         if unlocked_challenges:
             unlocked_names = ', '.join([c['name'] for c in unlocked_challenges])
@@ -1060,21 +805,13 @@ def submit_flag(challenge_id):
         return jsonify(response_data)
     else:
         db.session.commit()
+        log_audit_event(user_id=current_user.id, team_id=team_id, action='SUBMIT_FLAG', details=audit_details)
+        cache_service.invalidate_stats()
         
         # Calculate remaining attempts if limited
         attempts_remaining = None
         if challenge.max_attempts and challenge.max_attempts > 0:
-            if team_id:
-                attempts_used = Submission.query.filter_by(
-                    challenge_id=challenge_id,
-                    team_id=team_id
-                ).count()
-            else:
-                attempts_used = Submission.query.filter_by(
-                    challenge_id=challenge_id,
-                    user_id=current_user.id
-                ).count()
-            attempts_remaining = challenge.max_attempts - attempts_used
+            attempts_remaining = challenge.max_attempts - attempts.count()
         
         response = {
             'success': False,
@@ -1093,48 +830,20 @@ def submit_flag(challenge_id):
 @login_required
 def explore_flag(challenge_id):
     """Submit an additional flag for an already-solved challenge to unlock more paths (no points awarded)"""
-    from models.settings import Settings
     from models.branching import ChallengeFlag, ChallengeUnlock
+    from models.settings import Settings
     
-    # Check CTF status
-    ctf_status = Settings.get_ctf_status()
-    
-    if ctf_status == 'not_started':
-        start_time = Settings.get('ctf_start_time')
-        return jsonify({
-            'success': False, 
-            'message': f'CTF has not started yet. Starts at: {start_time.strftime("%Y-%m-%d %H:%M UTC") if start_time else "TBD"}'
-        }), 403
-    
-    if ctf_status == 'ended':
-        end_time = Settings.get('ctf_end_time')
-        return jsonify({
-            'success': False, 
-            'message': f'CTF has ended. Ended at: {end_time.strftime("%Y-%m-%d %H:%M UTC") if end_time else "Unknown"}'
-        }), 403
-    
-    if ctf_status == 'paused':
-        return jsonify({
-            'success': False, 
-            'message': 'CTF is currently paused by administrators. Please wait for it to resume.'
-        }), 403
-    
-    challenge = Challenge.query.get_or_404(challenge_id)
-    # Get user's team (needed for unlock checks)
-    team = current_user.get_team()
+    challenge = db.session.get(Challenge, challenge_id)
+    if not is_challenge_visible(challenge, current_user):
+        return jsonify(success=False, message='Challenge not found'), 404
+    if current_user.is_admin and not Settings.is_ctf_running():
+        return jsonify(success=False, message='The event is currently unavailable.'), 403
+
+    team = current_user.get_team() if Settings.get('teams_enabled', True, type='bool') else None
     team_id = team.id if team else None
 
-    # Only allow access if challenge is unlocked for this user/team or user is admin
-    if not current_user.is_admin:
-        if not challenge.is_unlocked_for_user(current_user.id, team_id):
-            return jsonify({'success': False, 'message': 'Challenge not found'}), 404
-    
-    # Check if already solved (must be solved to explore)
-    if team:
-        already_solved = challenge.is_solved_by_team(team_id)
-    else:
-        already_solved = challenge.is_solved_by_user(current_user.id)
-    
+    already_solved = challenge.solves.filter(participant_scope(Solve, current_user)).first() is not None
+
     if not already_solved:
         return jsonify({
             'success': False, 
@@ -1143,7 +852,10 @@ def explore_flag(challenge_id):
     
     # Check if this challenge has branching flags
     challenge_flags = ChallengeFlag.query.filter_by(challenge_id=challenge_id).all()
-    has_branching = len(challenge_flags) > 1
+    has_branching = (
+        any(flag.unlocks_challenge_id for flag in challenge_flags)
+        if challenge.docker_enabled else len(challenge_flags) > 1
+    )
     
     if not has_branching:
         return jsonify({
@@ -1167,7 +879,10 @@ def explore_flag(challenge_id):
         }), 429
     
     # Check the flag
-    matched_flag = challenge.check_flag(submitted_flag, team_id=team_id, user_id=current_user.id)
+    if challenge.docker_enabled:
+        matched_flag = challenge.check_docker_unlock_flag(submitted_flag, team_id, current_user.id)
+    else:
+        matched_flag = challenge.check_flag(submitted_flag, team_id=team_id, user_id=current_user.id)
     
     if not matched_flag:
         return jsonify({'success': False, 'message': 'Incorrect flag'}), 400
@@ -1184,16 +899,8 @@ def explore_flag(challenge_id):
         ChallengeUnlock.unlocked_by_flag_id == matched_flag.id
     )
     
-    if team_id:
-        unlock_query = unlock_query.filter(
-            db.or_(
-                ChallengeUnlock.user_id == current_user.id,
-                ChallengeUnlock.team_id == team_id
-            )
-        )
-    else:
-        unlock_query = unlock_query.filter(ChallengeUnlock.user_id == current_user.id)
-        
+    unlock_query = unlock_query.filter(participant_scope(ChallengeUnlock, current_user))
+
     existing_unlock = unlock_query.first()
     
     if existing_unlock:
@@ -1216,9 +923,6 @@ def explore_flag(challenge_id):
     # Get the unlocked challenge details
     unlocked_challenge = Challenge.query.get(matched_flag.unlocks_challenge_id)
     
-    # Do NOT modify is_hidden/is_visible - challenge stays hidden globally
-    # Visibility is controlled per-user/team via ChallengeUnlock + is_unlocked_for_user()
-    
     db.session.commit()
     
     # Invalidate caches
@@ -1231,7 +935,7 @@ def explore_flag(challenge_id):
         'unlocked_challenges': []
     }
     
-    if unlocked_challenge:
+    if is_challenge_visible(unlocked_challenge, current_user):
         response_data['unlocked_challenges'].append({
             'id': unlocked_challenge.id,
             'name': unlocked_challenge.name,

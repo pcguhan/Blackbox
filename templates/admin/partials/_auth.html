@@ -1,0 +1,24 @@
+{% set auth = auth_provider_settings() %}
+<div class="card mb-4">
+    <div class="card-header">
+        <h5 class="mb-0">Authentication</h5>
+    </div>
+    <div class="card-body">
+        <form method="post" action="{{ url_for('auth_admin.update') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="auth_google_enabled" name="auth_google_enabled" {% if auth.enabled %}checked{% endif %}>
+                <label class="form-check-label" for="auth_google_enabled">Enable Google sign-in</label>
+            </div>
+            {% if not auth.configured %}
+            <p class="form-text">Set the Google client ID, client secret, and callback URI on the server to enable Google sign-in.</p>
+            {% endif %}
+            <div class="form-check form-switch mt-3">
+                <input class="form-check-input" type="checkbox" id="auth_google_only" name="auth_google_only" {% if auth.only %}checked{% endif %}>
+                <label class="form-check-label" for="auth_google_only">Require Google sign-in for participants</label>
+            </div>
+            <p class="form-text">Participants must use a verified @vitstudent.ac.in account. Administrators can always sign in with their local username and password.</p>
+            <button type="submit" class="btn btn-primary">Save Authentication Settings</button>
+        </form>
+    </div>
+</div>

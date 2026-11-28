@@ -1,19 +1,14 @@
-{% extends "base.html" %}
+{% extends "admin/_layout.html" %}
 
 {% block title %}Docker Settings - Admin - {{ ctf_name }}{% endblock %}
 
-{% block content %}
-<div class="row">
-    <div class="col-md-3">
-        {% include 'admin/_sidebar.html' %}
-    </div>
-    
-    <div class="col-md-9">
+{% block admin_content %}
         <h2 class="mb-4">
             <i class="bi bi-gear"></i> Docker Container Settings
         </h2>
         
         <form method="POST" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <!-- Connection Settings -->
             <div class="card mb-4">
                 <div class="card-header bg-primary text-white">
@@ -204,8 +199,7 @@
                 </button>
             </div>
         </form>
-    </div>
-</div>
+
 
 <script>
 function toggleTLSFields(enabled) {

@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request, abort
+from flask import Blueprint, jsonify, abort
 from flask_login import login_required, current_user
 from models.notification import Notification
 from models.notification_read import NotificationRead
@@ -32,8 +32,12 @@ def get_notifications():
     notifs = Notification.query.order_by(Notification.created_at.desc()).limit(50).all()
 
     # Compute unread count for current user
-    read_ids = db.session.query(NotificationRead.notification_id).filter_by(user_id=current_user.id).all()
-    read_ids = {r[0] for r in read_ids}
+    read_ids = {
+        notification_id for notification_id, in db.session.query(NotificationRead.notification_id).filter(
+            NotificationRead.user_id == current_user.id,
+            NotificationRead.notification_id.in_([notification.id for notification in notifs]),
+        )
+    }
 
     notif_dicts = []
     unread = 0
@@ -51,7 +55,7 @@ def get_notifications():
 @login_required
 def mark_notification_read(notif_id):
     """Mark a notification as read for the current user"""
-    notif = Notification.query.get_or_404(notif_id)
+    Notification.query.filter_by(id=notif_id).with_for_update().first_or_404()
 
     existing = NotificationRead.query.filter_by(notification_id=notif_id, user_id=current_user.id).first()
     if not existing:
@@ -69,7 +73,8 @@ def delete_notification(notif_id):
     if not current_user.is_admin:
         return abort(403)
 
-    notif = Notification.query.get_or_404(notif_id)
+    notif = Notification.query.filter_by(id=notif_id).with_for_update().first_or_404()
+    NotificationRead.query.filter_by(notification_id=notif_id).delete()
     db.session.delete(notif)
     db.session.commit()
 

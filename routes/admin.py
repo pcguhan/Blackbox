@@ -11,12 +11,45 @@ from models.file import ChallengeFile
 from models.hint import Hint, HintUnlock
 from models.settings import Settings
 from services.cache import cache_service
+from services.backup_paths import (
+    archive_uploads, backup_dir, delete_backup_files, publish_backup_file, regular_file, valid_backup_name,
+)
 from services.file_storage import file_storage
+from services.scoring import ScoringService
+from services.standings import publish_standings, team_standings_enabled
+from utils.audit import log_audit_event
+from security_utils import CSRFProtection
+from services.admin_console import (
+    active_containers_query, console_filter_args, csv_download, hint_log_rows, hint_unlocks_query,
+    submissions_query, users_query,
+)
 import json
+import re
 from models.notification import Notification
 from services.websocket import WebSocketService
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
+
+DEFAULT_FLAG_PREFIX = 'CYS'
+FLAG_PREFIX_PATTERN = r'[A-Za-z0-9][A-Za-z0-9_-]{0,31}'
+
+
+def _flag_format_prefix():
+    prefix = Settings.get('flag_format_prefix', DEFAULT_FLAG_PREFIX)
+    return prefix if re.fullmatch(FLAG_PREFIX_PATTERN, prefix) else DEFAULT_FLAG_PREFIX
+
+
+def _valid_new_flag(flag, is_regex, prefix):
+    if not flag or len(flag) > 255:
+        return False
+    if is_regex:
+        try:
+            re.compile(flag)
+        except re.error:
+            return False
+        return True
+    return bool(re.fullmatch(re.escape(prefix) + r'\{[^{}\r\n]+\}', flag))
+
 
 def admin_required(f):
     """Decorator to require admin access"""
@@ -44,7 +77,9 @@ def dashboard():
     }
     
     # Recent activity
-    recent_solves = Solve.query.order_by(Solve.solved_at.desc()).limit(10).all()
+    recent_solves = Solve.query.filter(Solve.challenge_id.isnot(None)).order_by(
+        Solve.solved_at.desc(), Solve.id.desc()
+    ).limit(10).all()
     
     return render_template('admin/dashboard.html', stats=stats, recent_solves=recent_solves)
 
@@ -73,6 +108,9 @@ def manage_challenges():
             query = query.order_by(Challenge.name.asc())
 
     challenges = query.all()
+    counts = ScoringService.get_challenge_solve_counts(team_standings_enabled())
+    for challenge in challenges:
+        challenge.solve_count = counts.get(challenge.id, 0)
     return render_template('admin/challenges.html', challenges=challenges, current_sort=sort, current_order=order)
 
 
@@ -83,11 +121,23 @@ def create_challenge():
     """Create a new challenge"""
     # Check if ACT system is enabled
     act_system_enabled = Settings.get('act_system_enabled', default=False, type='bool')
+    flag_format_prefix = _flag_format_prefix()
     
     if request.method == 'POST':
         from models.branching import ChallengeFlag
         
         data = request.form
+        additional_flags = data.getlist('additional_flags[]')
+        flag_is_regex = data.getlist('flag_is_regex[]')
+        flags_to_validate = [(data.get('flag'), data.get('is_regex') == 'true')]
+        flags_to_validate.extend(
+            (flag.strip(), i < len(flag_is_regex) and flag_is_regex[i] == 'true')
+            for i, flag in enumerate(additional_flags) if flag.strip()
+        )
+        if not all(_valid_new_flag(flag, is_regex, flag_format_prefix) for flag, is_regex in flags_to_validate):
+            flash(f'Enter flags in {flag_format_prefix}{{...}} format or provide a valid regex pattern.', 'error')
+            return render_template('admin/create_challenge.html', act_system_enabled=act_system_enabled,
+                                   flag_format_prefix=flag_format_prefix), 400
         
         # Only set ACT fields if ACT system is enabled
         act_value = data.get('act', 'ACT I') if act_system_enabled else None
@@ -113,7 +163,10 @@ def create_challenge():
             unlocks_act=unlocks_act_value,
             # Docker fields
             docker_enabled=data.get('docker_enabled') == 'true',
-            docker_image=data.get('docker_image') if data.get('docker_enabled') == 'true' else None,
+            docker_image=(
+                data.get('docker_image_manual') if data.get('docker_image') in ('', 'custom', None)
+                else data.get('docker_image')
+            ) if data.get('docker_enabled') == 'true' else None,
             docker_connection_info=data.get('docker_connection_info') if data.get('docker_enabled') == 'true' else None,
             docker_flag_path=data.get('docker_flag_path') if data.get('docker_enabled') == 'true' else None,
             detect_regex_sharing=data.get('detect_regex_sharing') == 'true'
@@ -133,11 +186,9 @@ def create_challenge():
         db.session.add(primary_flag)
         
         # Handle additional flags
-        additional_flags = request.form.getlist('additional_flags[]')
         flag_labels = request.form.getlist('flag_labels[]')
         flag_points = request.form.getlist('flag_points[]')
         flag_cases = request.form.getlist('flag_case[]')
-        flag_is_regex = request.form.getlist('flag_is_regex[]')
         
         for i in range(len(additional_flags)):
             if additional_flags[i].strip():
@@ -256,12 +307,15 @@ def create_challenge():
         db.session.commit()
         
         cache_service.invalidate_all_challenges()
+        cache_service.invalidate_scoring()
+        publish_standings()
         
         flash(f'Challenge "{challenge.name}" created successfully!', 'success')
         
         return redirect(url_for('admin.manage_challenges'))
     
-    return render_template('admin/create_challenge.html', act_system_enabled=act_system_enabled)
+    return render_template('admin/create_challenge.html', act_system_enabled=act_system_enabled,
+                           flag_format_prefix=flag_format_prefix)
 
 @admin_bp.route('/challenges/<int:challenge_id>/edit', methods=['GET', 'POST'])
 @login_required
@@ -507,8 +561,9 @@ def edit_challenge(challenge_id):
         
         db.session.commit()
         
-        cache_service.invalidate_challenge(challenge_id)
         cache_service.invalidate_all_challenges()
+        cache_service.invalidate_scoring()
+        publish_standings()
         
         flash(f'Challenge "{challenge.name}" updated successfully!', 'success')
         return redirect(url_for('admin.manage_challenges'))
@@ -538,6 +593,7 @@ def edit_challenge(challenge_id):
                           existing_hints=existing_hints,
                           primary_flag=primary_flag,
                           additional_flags=additional_flags,
+                          flag_format_prefix=_flag_format_prefix(),
                           act_system_enabled=act_system_enabled)
 
 
@@ -546,12 +602,10 @@ def edit_challenge(challenge_id):
 @admin_required
 def delete_challenge(challenge_id):
     """Delete a challenge"""
-    challenge = Challenge.query.get_or_404(challenge_id)
+    challenge = Challenge.query.filter_by(id=challenge_id).with_for_update().first_or_404()
     
     # Delete associated data in correct order (respecting foreign key constraints)
     from models.branching import ChallengeFlag, ChallengePrerequisite, ChallengeUnlock
-    from models.hint import HintUnlock
-    
     # Step 1: Delete solves (references challenge_flags.id)
     Solve.query.filter_by(challenge_id=challenge_id).delete()
     
@@ -559,6 +613,8 @@ def delete_challenge(challenge_id):
     Submission.query.filter_by(challenge_id=challenge_id).delete()
     
     # Step 3: Delete hint unlocks (references hints.id)
+    hint_ids = db.session.query(Hint.id).filter(Hint.challenge_id == challenge_id)
+    HintUnlock.query.filter(HintUnlock.hint_id.in_(hint_ids)).delete(synchronize_session=False)
     Hint.query.filter_by(challenge_id=challenge_id).delete()
     
     # Step 4: Delete unlock records
@@ -578,6 +634,9 @@ def delete_challenge(challenge_id):
     )
     
     # Step 7: Delete all flags for this challenge
+    flag_ids = db.session.query(ChallengeFlag.id).filter(ChallengeFlag.challenge_id == challenge_id)
+    ChallengeUnlock.query.filter(ChallengeUnlock.unlocked_by_flag_id.in_(flag_ids)).delete(synchronize_session=False)
+    Solve.query.filter(Solve.flag_id.in_(flag_ids)).update({Solve.flag_id: None}, synchronize_session=False)
     ChallengeFlag.query.filter_by(challenge_id=challenge_id).delete()
 
     # Step 7a: Delete container instances and related events for this challenge
@@ -630,10 +689,10 @@ def delete_challenge(challenge_id):
     db.session.delete(challenge)
     db.session.commit()
     
-    cache_service.invalidate_challenge(challenge_id)
     cache_service.invalidate_all_challenges()
-    cache_service.invalidate_scoreboard()
-    
+    cache_service.invalidate_scoring()
+    publish_standings()
+
     return jsonify({'success': True, 'message': 'Challenge deleted'})
 
 
@@ -647,8 +706,9 @@ def toggle_challenge_enabled(challenge_id):
     challenge.is_enabled = not challenge.is_enabled
     db.session.commit()
     
-    cache_service.invalidate_challenge(challenge_id)
     cache_service.invalidate_all_challenges()
+    cache_service.invalidate_scoring()
+    publish_standings()
     
     status = "enabled" if challenge.is_enabled else "disabled"
     return jsonify({
@@ -658,44 +718,59 @@ def toggle_challenge_enabled(challenge_id):
     })
 
 
+def _delete_attachment(attachment):
+    from pathlib import Path
+
+    challenge = Challenge.query.filter_by(id=attachment.challenge_id).with_for_update().first_or_404()
+    field = 'images' if attachment.is_image else 'files'
+    url = attachment.get_download_url()
+    try:
+        entries = json.loads(getattr(challenge, field) or '[]')
+    except json.JSONDecodeError:
+        entries = None
+    if isinstance(entries, list):
+        remaining = [entry for entry in entries
+                     if (entry.get('url') if isinstance(entry, dict) else entry) != url]
+        setattr(challenge, field, json.dumps(remaining))
+
+    if not file_storage.delete_file(attachment.filepath) and Path(attachment.filepath).exists():
+        db.session.rollback()
+        return jsonify({'success': False, 'message': 'Could not remove the attachment from storage'}), 500
+
+    db.session.delete(attachment)
+    db.session.commit()
+    cache_service.invalidate_scoring(challenge.id)
+    label = 'Image' if attachment.is_image else 'File'
+    return jsonify({'success': True, 'message': f'{label} deleted'})
+
+
 @admin_bp.route('/challenges/files/<int:file_id>/delete', methods=['POST'])
 @login_required
 @admin_required
 def delete_challenge_file(file_id):
-    """Delete a challenge file"""
-    challenge_file = ChallengeFile.query.get_or_404(file_id)
-    challenge_id = challenge_file.challenge_id
-    
-    # Delete physical file
-    file_storage.delete_file(challenge_file.filepath)
-    
-    # Delete database record
-    db.session.delete(challenge_file)
-    db.session.commit()
-    
-    cache_service.invalidate_challenge(challenge_id)
-    
-    return jsonify({'success': True, 'message': 'File deleted'})
+    """Delete a challenge file."""
+    return _delete_attachment(ChallengeFile.query.get_or_404(file_id))
 
 
 @admin_bp.route('/challenges/images/<int:image_id>/delete', methods=['POST'])
 @login_required
 @admin_required
 def delete_challenge_image(image_id):
-    """Delete a challenge image"""
-    challenge_image = ChallengeFile.query.get_or_404(image_id)
-    challenge_id = challenge_image.challenge_id
-    
-    # Delete physical file
-    file_storage.delete_file(challenge_image.filepath)
-    
-    # Delete database record
-    db.session.delete(challenge_image)
+    """Delete a challenge image."""
+    return _delete_attachment(ChallengeFile.query.get_or_404(image_id))
+
+
+def _detach_and_delete_flag(flag):
+    from models.branching import ChallengeUnlock
+
+    challenge_id = flag.challenge_id
+    Challenge.query.filter_by(id=challenge_id).with_for_update().first_or_404()
+    ChallengeUnlock.query.filter_by(unlocked_by_flag_id=flag.id).delete()
+    Solve.query.filter_by(flag_id=flag.id).update({Solve.flag_id: None})
+    db.session.delete(flag)
     db.session.commit()
-    
-    cache_service.invalidate_challenge(challenge_id)
-    
-    return jsonify({'success': True, 'message': 'Image deleted'})
+    cache_service.invalidate_all_challenges()
+    cache_service.invalidate_scoring()
 
 
 @admin_bp.route('/challenges/flags/<int:flag_id>/delete', methods=['POST'])
@@ -709,18 +784,8 @@ def delete_challenge_flag(flag_id):
     if flag.flag_label == 'Primary Flag':
         return jsonify({'success': False, 'message': 'Cannot delete the primary flag'}), 400
         
-    challenge_id = flag.challenge_id
-    
-    # Check if this flag unlocks anything
-    from models.branching import ChallengeUnlock
-    ChallengeUnlock.query.filter_by(unlocked_by_flag_id=flag.id).delete()
-    
-    db.session.delete(flag)
-    db.session.commit()
-    
-    cache_service.invalidate_challenge(challenge_id)
-    cache_service.invalidate_all_challenges()
-    
+    _detach_and_delete_flag(flag)
+
     return jsonify({'success': True, 'message': 'Flag deleted'})
 
 
@@ -730,8 +795,11 @@ def delete_challenge_flag(flag_id):
 @admin_required
 def manage_users():
     """Manage users page"""
-    users = User.query.all()
-    return render_template('admin/users.html', users=users)
+    users = users_query(request.args).all()
+    return render_template(
+        'admin/users.html', users=users, teams=Team.query.order_by(Team.name).all(),
+        filter_args=console_filter_args(request.args, 'q', 'role', 'status', 'user_id', 'team_id'),
+    )
 
 
 @admin_bp.route('/users/<int:user_id>/toggle-admin', methods=['POST'])
@@ -746,6 +814,8 @@ def toggle_admin(user_id):
     
     user.is_admin = not user.is_admin
     db.session.commit()
+    cache_service.invalidate_scoring()
+    publish_standings()
     
     return jsonify({
         'success': True,
@@ -766,6 +836,8 @@ def toggle_active(user_id):
     
     user.is_active = not user.is_active
     db.session.commit()
+    cache_service.invalidate_scoring()
+    publish_standings()
     
     return jsonify({
         'success': True,
@@ -800,8 +872,8 @@ def delete_team(team_id):
     db.session.delete(team)
     db.session.commit()
     
-    cache_service.invalidate_team(team_id)
-    cache_service.invalidate_scoreboard()
+    cache_service.invalidate_scoring()
+    publish_standings()
     
     return jsonify({'success': True, 'message': 'Team deleted'})
 
@@ -812,23 +884,26 @@ def delete_team(team_id):
 @admin_required
 def adjust_user_points(user_id):
     """Manually adjust user points by creating a solve adjustment"""
-    from models.submission import Solve
-    from models.challenge import Challenge
-    
     user = User.query.get_or_404(user_id)
-    data = request.get_json()
-    
-    points_delta = int(data.get('points', 0))
+    if user.is_admin:
+        return jsonify({'success': False, 'message': 'Admin accounts do not have a score.'}), 400
+    data = request.get_json(silent=True)
+    points_delta = data.get('points') if isinstance(data, dict) else None
+    if isinstance(points_delta, str):
+        try:
+            points_delta = int(points_delta)
+        except ValueError:
+            pass
+    if type(points_delta) is not int:
+        return jsonify({'success': False, 'message': 'Points must be an integer'}), 400
     reason = data.get('reason', 'Manual adjustment by admin')
     
     if points_delta == 0:
         return jsonify({'success': False, 'message': 'Points delta cannot be zero'}), 400
     
-    # Create a "virtual" solve record for tracking score adjustments
-    # We'll create a challenge with ID 0 that represents manual adjustments
     adjustment = Solve(
         user_id=user_id,
-        team_id=user.team_id,
+        team_id=user.team_id if team_standings_enabled() else None,
         challenge_id=None,  # None indicates manual adjustment
         points_earned=points_delta,
         solved_at=datetime.utcnow()
@@ -837,11 +912,13 @@ def adjust_user_points(user_id):
     db.session.add(adjustment)
     db.session.commit()
     
-    cache_service.invalidate_scoreboard()
-    if user.team_id:
-        cache_service.invalidate_team(user.team_id)
-    cache_service.invalidate_user(user_id)
-    
+    log_audit_event(
+        user_id=current_user.id, team_id=adjustment.team_id, action='ADJUST_POINTS',
+        details={'target_user_id': user_id, 'points': points_delta, 'reason': reason},
+    )
+    cache_service.invalidate_scoring()
+    publish_standings()
+
     return jsonify({
         'success': True,
         'new_score': user.get_score(),
@@ -857,9 +934,15 @@ def adjust_team_points(team_id):
     from models.submission import Solve
     
     team = Team.query.get_or_404(team_id)
-    data = request.get_json()
-    
-    points_delta = int(data.get('points', 0))
+    data = request.get_json(silent=True)
+    points_delta = data.get('points') if isinstance(data, dict) else None
+    if isinstance(points_delta, str):
+        try:
+            points_delta = int(points_delta)
+        except ValueError:
+            pass
+    if type(points_delta) is not int:
+        return jsonify({'success': False, 'message': 'Points must be an integer'}), 400
     reason = data.get('reason', 'Manual adjustment by admin')
     
     if points_delta == 0:
@@ -877,9 +960,13 @@ def adjust_team_points(team_id):
     db.session.add(adjustment)
     db.session.commit()
     
-    cache_service.invalidate_scoreboard()
-    cache_service.invalidate_team(team_id)
-    
+    log_audit_event(
+        user_id=current_user.id, team_id=adjustment.team_id, action='ADJUST_POINTS',
+        details={'target_team_id': team_id, 'points': points_delta, 'reason': reason},
+    )
+    cache_service.invalidate_scoring()
+    publish_standings()
+
     return jsonify({
         'success': True,
         'new_score': team.get_score(),
@@ -950,11 +1037,15 @@ def user_activity(user_id):
     total_submissions = Submission.query.filter_by(user_id=user_id).count()
     total_hints = len(hints_unlocked)
     total_score = user.get_score()
+    recent_submissions = user.submissions.order_by(
+        Submission.submitted_at.desc(), Submission.id.desc()
+    ).limit(10).all()
     
     return render_template('admin/user_activity.html', 
                           user=user,
                           solves_pagination=solves_pagination,
                           hints_unlocked=hints_unlocked,
+                          recent_submissions=recent_submissions,
                           total_solves=total_solves,
                           total_submissions=total_submissions,
                           total_hints=total_hints,
@@ -1061,6 +1152,7 @@ def settings():
                          flask_version=flask.__version__,
                          get_flask_version=lambda: flask.__version__,
                          ctf_settings=ctf_settings,
+                         flag_format_prefix=_flag_format_prefix(),
                          settings=all_settings)
 
 
@@ -1068,11 +1160,27 @@ def settings():
 @login_required
 @admin_required
 def update_event_config():
-    """Update event configuration (name, logo, description)"""
+    """Save only the event and scoring settings supplied by the form."""
     from models.settings import Settings
-    import os
-    from werkzeug.utils import secure_filename
+    from pathlib import Path
+    from uuid import uuid4
+    from services.image_sanitizer import InvalidImage, sanitize_upload
+
+    logo_file = request.files.get('ctf_logo')
+    logo_data = None
+    if logo_file and logo_file.filename:
+        try:
+            logo_data, logo_extension = sanitize_upload(logo_file, max_bytes=8 * 1024 * 1024, max_side=1024)
+        except InvalidImage as error:
+            flash(str(error), 'error')
+            return redirect(url_for('admin.settings'))
     
+    form = request.form
+    prefix = form.get('flag_format_prefix', '').strip()
+    if prefix and not re.fullmatch(FLAG_PREFIX_PATTERN, prefix):
+        flash('Use 1–32 letters, digits, underscores or hyphens for the flag prefix. Start with a letter or digit.', 'error')
+        return redirect(url_for('admin.settings'))
+
     try:
         # Update CTF name
         ctf_name = request.form.get('ctf_name', '').strip()
@@ -1080,72 +1188,65 @@ def update_event_config():
             Settings.set('ctf_name', ctf_name, 'string', 'Name of the CTF event')
         
         # Update CTF description
-        ctf_description = request.form.get('ctf_description', '').strip()
-        if ctf_description:
-            Settings.set('ctf_description', ctf_description, 'string', 'Description of the CTF event')
-        
-        # Update registration and team mode settings
-        allow_registration = 'allow_registration' in request.form
-        Settings.set('allow_registration', allow_registration, 'bool', 'Allow new user registrations')
-        
-        teams_enabled = 'teams_enabled' in request.form
-        Settings.set('teams_enabled', teams_enabled, 'bool', 'Enable teams feature (for solo competitions)')
-        
-        team_mode = 'team_mode' in request.form
-        Settings.set('team_mode', team_mode, 'bool', 'Enable team-based CTF mode')
-        
-        # Update scoreboard visibility
-        scoreboard_visible = 'scoreboard_visible' in request.form
-        Settings.set('scoreboard_visible', scoreboard_visible, 'bool', 'Show scoreboard to users')
-        from services.websocket import socketio
-        socketio.emit('scoreboard_visibility', {'visible': scoreboard_visible}, namespace='/live', to='scoreboard_authenticated')
-        
-        from services.standings import set_frozen, frozen_snapshot
-        set_frozen('scoreboard_frozen' in request.form)
-        socketio.emit('scoreboard_freeze', {'frozen': bool(frozen_snapshot())}, namespace='/live', to='scoreboard_authenticated')
+        for key, description in (
+            ('ctf_description', 'Description of the CTF event'),
+            ('event_subtitle', 'Subtitle shown on the event welcome page'),
+        ):
+            if key in form:
+                Settings.set(key, form[key].strip(), 'string', description)
+        if 'flag_format_prefix' in form:
+            Settings.set('flag_format_prefix', prefix or DEFAULT_FLAG_PREFIX, 'string', 'Prefix for new challenge flags')
 
+        # Hidden inputs supply false for unchecked switches. Missing fields belong to other forms.
+        for key, description in (
+            ('allow_registration', 'Allow new user registrations'),
+            ('teams_enabled', 'Enable teams feature'),
+            ('team_mode', 'Require teams to solve challenges'),
+            ('scoreboard_visible', 'Show scoreboard to users'),
+        ):
+            if key in form:
+                enabled = form.getlist(key)[-1].lower() in ('true', '1', 'yes', 'on')
+                Settings.set(key, enabled, 'bool', description)
+                if key == 'scoreboard_visible':
+                    from services.websocket import socketio
+                    socketio.emit('scoreboard_visibility', {'visible': enabled}, namespace='/live', to='scoreboard_authenticated')
+
+        if 'scoreboard_visible' in form:
+            from services.websocket import socketio
+            socketio.emit('scoreboard_visibility', {'visible': Settings.get('scoreboard_visible', True, type='bool')},
+                          namespace='/live', to='scoreboard_authenticated')
         # Update first blood bonus
-        first_blood_bonus = request.form.get('first_blood_bonus', '0')
-        try:
-            first_blood_bonus = int(first_blood_bonus)
+        first_blood_bonus = form.get('first_blood_bonus', type=int)
+        if first_blood_bonus is not None and 0 <= first_blood_bonus <= 500:
             Settings.set('first_blood_bonus', first_blood_bonus, 'int', 'Bonus points for first blood')
-        except ValueError:
-            pass  # Ignore invalid values
         
         # Update decay function
-        decay_function = request.form.get('decay_function', 'logarithmic')
+        decay_function = form.get('decay_function')
         if decay_function in ['logarithmic', 'parabolic']:
             Settings.set('decay_function', decay_function, 'string', 'Dynamic scoring decay function')
+            cache_service.invalidate_all_challenges()
+        if 'first_blood_bonus' in form or 'decay_function' in form:
+            cache_service.invalidate_scoreboard()
+
+        if 'scoreboard_frozen' in form:
+            from services.standings import set_frozen, frozen_snapshot
+            from services.websocket import socketio
+            set_frozen(form.getlist('scoreboard_frozen')[-1].lower() in ('true', '1', 'yes', 'on'))
+            socketio.emit('scoreboard_freeze', {'frozen': bool(frozen_snapshot())}, namespace='/live', to='scoreboard_authenticated')
         
+        cache_service.invalidate_scoring()
+        publish_standings()
+
         # Handle logo upload
-        if 'ctf_logo' in request.files:
-            logo_file = request.files['ctf_logo']
-            if logo_file and logo_file.filename:
-                from flask import current_app
-                
-                # Use /var/uploads/logos (volume-mounted writable directory)
-                uploads_dir = current_app.config['LOGO_UPLOAD_FOLDER']
-                
-                # Create uploads directory if it doesn't exist
-                os.makedirs(uploads_dir, exist_ok=True)
-                
-                # Secure the filename
-                filename = secure_filename(logo_file.filename)
-                
-                # Add timestamp to avoid conflicts
-                from datetime import datetime
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                name, ext = os.path.splitext(filename)
-                filename = f'ctf_logo_{timestamp}{ext}'
-                
-                # Save the file
-                filepath = os.path.join(uploads_dir, filename)
-                logo_file.save(filepath)
-                
-                # Store relative path in settings
-                Settings.set('ctf_logo', filename, 'string', 'Path to CTF logo image')
+        if logo_data is not None:
+            uploads_dir = Path(current_app.config['LOGO_UPLOAD_FOLDER'])
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            filename = f'ctf_logo_{uuid4().hex}.{logo_extension}'
+            with (uploads_dir / filename).open('xb') as target:
+                target.write(logo_data)
+            Settings.set('ctf_logo', filename, 'string', 'Path to CTF logo image')
         
-        flash('Event configuration updated successfully!', 'success')
+        flash('Settings saved.', 'success')
     except Exception as e:
         flash(f'Error updating configuration: {str(e)}', 'error')
     
@@ -1187,61 +1288,9 @@ def update_email_config():
 
 
 @admin_bp.route('/settings/background-theme', methods=['POST'])
-@login_required
-@admin_required
 def update_background_theme():
-    """Update custom background theme"""
-    from models.settings import Settings
-    import re
-    
-    try:
-        site_theme = request.form.get('site_theme', Settings.get('site_theme', 'default'))
-        if site_theme not in ('default', 'graphite', 'forest', 'copper', 'paper'):
-            flash('Choose one of the available colour palettes.', 'error')
-            return redirect(url_for('admin.settings'))
-        Settings.set('site_theme', site_theme, 'string', 'Site colour palette selected by administrators')
-        enabled = 'custom_background_enabled' in request.form
-        Settings.set('custom_background_enabled', enabled, 'bool', 'Enable custom background theme')
-        
-        if enabled:
-            css = request.form.get('custom_background_css', '').strip()
-            
-            # Security: Only allow background-related CSS properties
-            # NOTE: This feature is restricted to ADMINS ONLY. Users cannot modify this setting.
-            allowed_properties = [
-                'background', 'background-color', 'background-image', 
-                'background-size', 'background-position', 'background-repeat',
-                'background-attachment', 'animation', '@keyframes'
-            ]
-            
-            # Very basic validation - check if it contains only allowed properties
-            # This is a simple check, not a full CSS parser
-            if css:
-                # Remove comments
-                css_clean = re.sub(r'/\*.*?\*/', '', css, flags=re.DOTALL)
-                
-                # Check for potentially dangerous content
-                # Enhanced blacklist for XSS prevention
-                dangerous_patterns = [
-                    r'<script', r'javascript:', r'onerror', r'onload',
-                    r'eval\(', r'expression\(', r'import\s+["\']',
-                    r'behavior:', r'binding:', r'-moz-binding'
-                ]
-                
-                for pattern in dangerous_patterns:
-                    if re.search(pattern, css_clean, re.IGNORECASE):
-                        flash('Invalid CSS: Potentially dangerous content detected', 'error')
-                        return redirect(url_for('admin.settings'))
-                
-                Settings.set('custom_background_css', css, 'string', 'Custom background CSS')
-            else:
-                Settings.set('custom_background_css', '', 'string', 'Custom background CSS')
-        
-        flash('Background theme updated successfully!', 'success')
-    except Exception as e:
-        flash(f'Error updating background theme: {str(e)}', 'error')
-    
-    return redirect(url_for('admin.settings'))
+    from routes.appearance_admin import update_appearance
+    return update_appearance()
 
 
 @admin_bp.route('/update-system-settings', methods=['POST'])
@@ -1369,7 +1418,8 @@ def delete_hint(hint_id):
     db.session.delete(hint)
     db.session.commit()
     
-    cache_service.invalidate_challenge(challenge_id)
+    cache_service.invalidate_scoring(challenge_id)
+    publish_standings()
     
     return jsonify({
         'success': True,
@@ -1481,13 +1531,8 @@ def delete_flag(flag_id):
     from models.branching import ChallengeFlag
     
     flag = ChallengeFlag.query.get_or_404(flag_id)
-    challenge_id = flag.challenge_id
-    
-    db.session.delete(flag)
-    db.session.commit()
-    
-    cache_service.invalidate_challenge(challenge_id)
-    
+    _detach_and_delete_flag(flag)
+
     return jsonify({'success': True, 'message': 'Flag deleted successfully'})
 
 
@@ -1699,14 +1744,18 @@ def get_branching_connections():
 def hint_logs():
     """View hint unlock logs"""
     page = request.args.get('page', 1, type=int)
-    per_page = 50
-    
-    # Get all hint unlocks with pagination
-    hint_unlocks = HintUnlock.query.order_by(HintUnlock.unlocked_at.desc()).paginate(
-        page=page, per_page=per_page, error_out=False
+    query = hint_unlocks_query(request.args)
+    total_cost, unique_users = query.with_entities(
+        db.func.coalesce(db.func.sum(HintUnlock.cost_paid), 0),
+        db.func.count(db.distinct(HintUnlock.user_id)),
+    ).one()
+    hint_unlocks = hint_log_rows(query).paginate(page=page, per_page=50, error_out=False)
+    return render_template(
+        'admin/hint_logs.html', hint_unlocks=hint_unlocks, total_cost=total_cost, unique_users=unique_users,
+        pagination_args=console_filter_args(
+            request.args, 'user', 'team', 'challenge', 'user_id', 'team_id', 'challenge_id', 'start_date', 'end_date'
+        ),
     )
-    
-    return render_template('admin/hint_logs.html', hint_unlocks=hint_unlocks)
 
 
 @admin_bp.route('/hint-logs/api')
@@ -1716,21 +1765,7 @@ def hint_logs_api():
     """Get hint unlock logs as JSON"""
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 50, type=int)
-    user_id = request.args.get('user_id', type=int)
-    team_id = request.args.get('team_id', type=int)
-    challenge_id = request.args.get('challenge_id', type=int)
-    
-    query = HintUnlock.query
-    
-    # Apply filters
-    if user_id:
-        query = query.filter_by(user_id=user_id)
-    if team_id:
-        query = query.filter_by(team_id=team_id)
-    if challenge_id:
-        query = query.join(Hint).filter(Hint.challenge_id == challenge_id)
-    
-    hint_unlocks = query.order_by(HintUnlock.unlocked_at.desc()).paginate(
+    hint_unlocks = hint_log_rows(hint_unlocks_query(request.args)).paginate(
         page=page, per_page=per_page, error_out=False
     )
     
@@ -1890,48 +1925,38 @@ def backups():
 @login_required
 @admin_required
 def list_backups():
-    """List all available backups (stored in uploads directory)"""
-    import json
-    import os
-    from pathlib import Path
-    from datetime import datetime
-    
+    """List the available private database dumps."""
     try:
-        # Store backups in the uploads directory under 'backups' folder
-        backup_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        
+        directory = backup_dir()
         backups = []
-        
-        if backup_dir.exists():
-            for backup_file in sorted(backup_dir.glob('backup_*.sql.gz'), reverse=True):
-                backup_name = backup_file.stem.replace('.sql', '')  # Remove .sql from name
-                
-                # Try to read metadata if it exists
-                metadata_file = backup_file.with_suffix('.json')
-                if metadata_file.exists():
-                    try:
-                        with open(metadata_file, 'r') as f:
-                            metadata = json.load(f)
-                            backups.append(metadata)
-                    except json.JSONDecodeError:
-                        # Use file modification time as fallback, convert to ISO format
-                        timestamp = datetime.fromtimestamp(backup_file.stat().st_mtime).isoformat()
-                        backups.append({
-                            'backup_name': backup_name,
-                            'timestamp': timestamp,
-                            'size_mb': round(backup_file.stat().st_size / (1024 * 1024), 2)
-                        })
-                else:
-                    # Use file modification time as fallback, convert to ISO format
-                    timestamp = datetime.fromtimestamp(backup_file.stat().st_mtime).isoformat()
-                    backups.append({
-                        'backup_name': backup_name,
-                        'timestamp': timestamp,
-                        'size_mb': round(backup_file.stat().st_size / (1024 * 1024), 2)
-                    })
-        
-        return jsonify({'success': True, 'backups': backups})
+        for backup_file in sorted(directory.glob('backup_*.sql.gz'), reverse=True):
+            name = backup_file.name.removesuffix('.sql.gz')
+            if not valid_backup_name(name) or not regular_file(backup_file):
+                continue
+            try:
+                stat = backup_file.stat()
+            except FileNotFoundError:
+                continue
+            metadata = {
+                'timestamp': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                'size_mb': round(stat.st_size / (1024 * 1024), 2),
+            }
+            for suffix in ('.json', '.sql.json'):
+                sidecar = directory / f'{name}{suffix}'
+                if not regular_file(sidecar):
+                    continue
+                try:
+                    stored = json.loads(sidecar.read_text(encoding='utf-8'))
+                except (ValueError, OSError):
+                    continue
+                if isinstance(stored, dict):
+                    metadata.update(stored)
+                    break
+            metadata['backup_name'] = name
+            backups.append(metadata)
+        response = jsonify({'success': True, 'backups': backups})
+        response.cache_control.no_store = True
+        return response
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1940,6 +1965,7 @@ def list_backups():
 @admin_bp.route('/backups/api/create', methods=['POST'])
 @login_required
 @admin_required
+@CSRFProtection.csrf_protect()
 def create_backup():
     """Create a manual database backup"""
     import gzip
@@ -1952,22 +1978,19 @@ def create_backup():
         db_uri = current_app.config.get('SQLALCHEMY_DATABASE_URI')
         
         # Create backup directory
-        backup_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        directory = backup_dir()
         
         # Generate backup name
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         backup_name = f'backup_{timestamp}'
-        backup_file = backup_dir / f'{backup_name}.sql.gz'
+        backup_file = directory / f'{backup_name}.sql.gz'
         
         # Determine optional components requested (JSON body or form)
-        include_uploads = False
-        include_redis = False
-        try:
-            data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if isinstance(data, dict):
             include_uploads = bool(data.get('include_uploads'))
             include_redis = bool(data.get('include_redis'))
-        except Exception:
+        else:
             include_uploads = request.form.get('include_uploads') == 'on'
             include_redis = request.form.get('include_redis') == 'on'
 
@@ -2010,7 +2033,7 @@ def create_backup():
             
             if rows:
                 cursor.execute(f"DESCRIBE `{table}`")
-                columns = [col[0] for col in cursor.fetchall()]
+                columns = ', '.join(f'`{col[0]}`' for col in cursor.fetchall())
                 
                 for row in rows:
                     values = []
@@ -2026,14 +2049,14 @@ def create_backup():
                             escaped = str(value).replace("'", "''")
                             values.append(f"'{escaped}'")
                     
-                    sql_dump.append(f"INSERT INTO `{table}` VALUES ({', '.join(values)});")
+                    sql_dump.append(f"INSERT INTO `{table}` ({columns}) VALUES ({', '.join(values)});")
         
         sql_dump.append("SET FOREIGN_KEY_CHECKS=1;")
         
         conn.close()
         
         # Write compressed backup
-        with gzip.open(backup_file, 'wt', encoding='utf-8') as f:
+        with publish_backup_file(backup_file) as staged, gzip.open(staged, 'wt', encoding='utf-8') as f:
             f.write('\n'.join(sql_dump))
         
         # Prepare components metadata
@@ -2048,11 +2071,9 @@ def create_backup():
         if include_uploads:
             try:
                 uploads_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads'))
-                uploads_archive = backup_dir / f"{backup_name}_uploads.tar.gz"
+                uploads_archive = directory / f"{backup_name}_uploads.tar.gz"
                 if uploads_dir.exists():
-                    import tarfile
-                    with tarfile.open(uploads_archive, 'w:gz') as tar:
-                        tar.add(uploads_dir, arcname='uploads')
+                    archive_uploads(uploads_dir, uploads_archive)
                     components['uploads'] = True
                     sizes['uploads_mb'] = round(uploads_archive.stat().st_size / (1024 * 1024), 2)
             except Exception as e:
@@ -2082,8 +2103,9 @@ def create_backup():
                             dump_path = Path(dirpath) / filename
                             if dump_path.exists():
                                 import shutil
-                                target = backup_dir / f"{backup_name}_redis.rdb"
-                                shutil.copy2(dump_path, target)
+                                target = directory / f"{backup_name}_redis.rdb"
+                                with publish_backup_file(target) as staged:
+                                    shutil.copyfile(dump_path, staged)
                                 components['redis'] = True
                                 sizes['redis_mb'] = round(target.stat().st_size / (1024 * 1024), 2)
                     except Exception:
@@ -2102,8 +2124,8 @@ def create_backup():
             'sizes': sizes
         }
         
-        metadata_file = backup_dir / f'{backup_name}.json'
-        with open(metadata_file, 'w') as f:
+        metadata_file = directory / f'{backup_name}.json'
+        with publish_backup_file(metadata_file) as staged, staged.open('w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2)
 
         return jsonify({
@@ -2119,144 +2141,63 @@ def create_backup():
 @admin_bp.route('/backups/api/restore', methods=['POST'])
 @login_required
 @admin_required
+@CSRFProtection.csrf_protect()
 def restore_backup():
     """Restore from a backup"""
+    from contextlib import closing
     import gzip
-    from pathlib import Path
+    from services.backup_sql import read_backup_inserts
+
+    data = request.get_json(silent=True)
+    backup_name = data.get('backup_name') if isinstance(data, dict) else None
     
-    data = request.get_json()
-    backup_name = data.get('backup_name')
-    
-    if not backup_name or not backup_name.startswith('backup_'):
+    if not valid_backup_name(backup_name):
         return jsonify({'success': False, 'error': 'Invalid backup name'})
     
     try:
-        backup_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-        backup_file = backup_dir / f'{backup_name}.sql.gz'
+        backup_file = backup_dir() / f'{backup_name}.sql.gz'
         
-        if not backup_file.exists():
+        if not regular_file(backup_file):
             return jsonify({'success': False, 'error': 'Backup file not found'})
-        
-        # Read and execute SQL dump
+
+        with gzip.open(backup_file, 'rt', encoding='utf-8') as f:
+            statements = read_backup_inserts(f.read())
+
         import pymysql
         from urllib.parse import urlparse
         
         db_uri = current_app.config.get('SQLALCHEMY_DATABASE_URI')
         parsed = urlparse(db_uri)
         
-        conn = pymysql.connect(
+        with closing(pymysql.connect(
             host=parsed.hostname,
             port=parsed.port or 3306,
             user=parsed.username,
             password=parsed.password,
             database=parsed.path.lstrip('/'),
-            charset='utf8mb4'
-        )
-        
-        cursor = conn.cursor()
-        
-        # Disable foreign key checks for restore
-        cursor.execute('SET FOREIGN_KEY_CHECKS=0')
-        
-        # Read backup file
-        with gzip.open(backup_file, 'rt', encoding='utf-8') as f:
-            sql_content = f.read()
-        
-        # Parse SQL to extract only INSERT statements (skip DROP/CREATE)
-        # We only want to restore DATA, not recreate table structures
-        statements = []
-        current_statement = []
-        
-        for line in sql_content.split('\n'):
-            line = line.strip()
-            
-            # Skip comments and empty lines
-            if line.startswith('--') or not line:
-                continue
-            
-            # Skip DROP TABLE and CREATE TABLE statements
-            # We only want INSERT statements (data restoration)
-            if line.upper().startswith('DROP TABLE') or line.upper().startswith('CREATE TABLE'):
-                continue
-            
-            current_statement.append(line)
-            
-            # Check if statement is complete (ends with semicolon)
-            if line.endswith(';'):
-                full_statement = ' '.join(current_statement).strip()
-                if full_statement:
-                    statements.append(full_statement)
-                current_statement = []
-        
-        # Add any remaining statement
-        if current_statement:
-            full_statement = ' '.join(current_statement).strip()
-            if full_statement and full_statement.endswith(';'):
-                statements.append(full_statement)
-        
-        # Get list of tables to clear
-        cursor.execute("SHOW TABLES")
-        tables = [table[0] for table in cursor.fetchall()]
-        
-        # Clear all existing data from tables (DELETE, not DROP)
-        tables_cleared = 0
-        for table in tables:
+            charset='utf8mb4',
+            autocommit=False,
+        )) as conn:
             try:
-                # Skip system/migration tables if any
-                if table in ['alembic_version', 'migrations']:
-                    continue
-                cursor.execute(f"DELETE FROM `{table}`")
-                tables_cleared += 1
-            except pymysql.err.Error as e:
-                # Some tables might fail, continue with others
-                pass
-        
-        # Execute INSERT statements with proper error handling
-        errors = []
-        success_count = 0
-        
-        for i, statement in enumerate(statements):
-            try:
-                # Only process SET and INSERT statements
-                if statement.upper().startswith('SET '):
-                    cursor.execute(statement)
-                    success_count += 1
-                elif statement.upper().startswith('INSERT '):
-                    cursor.execute(statement)
-                    success_count += 1
-                    
-            except pymysql.err.Error as e:
-                error_msg = f"Statement {i+1}: {str(e)[:100]}"
-                errors.append(error_msg)
-                # Continue with other statements instead of failing completely
-                continue
-        
-        # Re-enable foreign key checks
-        cursor.execute('SET FOREIGN_KEY_CHECKS=1')
-        
-        conn.commit()
-        conn.close()
-        
-        # Clear all caches
-        from services.cache import cache_service
+                with conn.cursor() as cursor:
+                    cursor.execute('SET FOREIGN_KEY_CHECKS=0')
+                    cursor.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
+                    tables = [row[0] for row in cursor.fetchall() if row[0] not in ('alembic_version', 'migrations')]
+                    for table in tables:
+                        cursor.execute(f"DELETE FROM `{table.replace('`', '``')}`")
+                    for statement in statements:
+                        cursor.execute(statement)
+                    cursor.execute('SET FOREIGN_KEY_CHECKS=1')
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
         cache_service.clear_all()
-        
-        if errors and success_count == 0:
-            return jsonify({
-                'success': False,
-                'error': f'Restore failed. No data could be restored. Errors: {"; ".join(errors[:3])}'
-            })
-        elif errors:
-            return jsonify({
-                'success': True,
-                'message': f'Backup restored! Cleared {tables_cleared} tables and inserted {success_count} records. Some minor errors occurred but restore succeeded. All caches cleared.',
-                'warnings': errors[:5]  # Show first 5 errors
-            })
-        else:
-            return jsonify({
-                'success': True,
-                'message': f'Backup restored successfully! Cleared {tables_cleared} tables and inserted {success_count} records. All caches cleared.'
-            })
+        return jsonify({
+            'success': True,
+            'message': f'Backup restored successfully. Restored {len(statements)} data statements.',
+        })
             
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -2265,26 +2206,17 @@ def restore_backup():
 @admin_bp.route('/backups/api/delete', methods=['POST'])
 @login_required
 @admin_required
+@CSRFProtection.csrf_protect()
 def delete_backup():
     """Delete a backup"""
-    from pathlib import Path
+    data = request.get_json(silent=True)
+    backup_name = data.get('backup_name') if isinstance(data, dict) else None
     
-    data = request.get_json()
-    backup_name = data.get('backup_name')
-    
-    if not backup_name or not backup_name.startswith('backup_'):
+    if not valid_backup_name(backup_name):
         return jsonify({'success': False, 'error': 'Invalid backup name'})
     
     try:
-        backup_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-        backup_file = backup_dir / f'{backup_name}.sql.gz'
-        metadata_file = backup_dir / f'{backup_name}.json'
-        
-        # Delete files
-        if backup_file.exists():
-            backup_file.unlink()
-        if metadata_file.exists():
-            metadata_file.unlink()
+        delete_backup_files(backup_dir(), backup_name)
         
         return jsonify({'success': True, 'message': 'Backup deleted successfully'})
             
@@ -2298,26 +2230,26 @@ def delete_backup():
 def download_backup(backup_name):
     """Download a backup file"""
     from flask import send_file
-    from pathlib import Path
-    
-    if not backup_name.startswith('backup_'):
+
+    if not valid_backup_name(backup_name):
         flash('Invalid backup name', 'error')
         return redirect(url_for('admin.backups'))
     
     try:
-        backup_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-        backup_file = backup_dir / f'{backup_name}.sql.gz'
+        backup_file = backup_dir() / f'{backup_name}.sql.gz'
         
-        if not backup_file.exists():
+        if not regular_file(backup_file):
             flash('Backup file not found', 'error')
             return redirect(url_for('admin.backups'))
         
-        return send_file(
+        response = send_file(
             backup_file,
             as_attachment=True,
             download_name=f'{backup_name}.sql.gz',
             mimetype='application/gzip'
         )
+        response.cache_control.no_store = True
+        return response
         
     except Exception as e:
         flash(f'Download failed: {str(e)}', 'error')
@@ -2327,12 +2259,9 @@ def download_backup(backup_name):
 @admin_bp.route('/backups/api/upload', methods=['POST'])
 @login_required
 @admin_required
+@CSRFProtection.csrf_protect()
 def upload_backup():
     """Upload a backup file for restoration"""
-    from pathlib import Path
-    from datetime import datetime
-    import json
-    
     try:
         if 'backup_file' not in request.files:
             return jsonify({'success': False, 'error': 'No file uploaded'})
@@ -2346,18 +2275,17 @@ def upload_backup():
             return jsonify({'success': False, 'error': 'Invalid file type. Must be .sql.gz'})
         
         # Save to backups directory
-        backup_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'static/uploads')) / 'backups'
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        directory = backup_dir()
         
         # Generate name if not already in backup format
-        if file.filename.startswith('backup_'):
-            backup_name = file.filename.replace('.sql.gz', '')
-        else:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_name = file.filename.removesuffix('.sql.gz')
+        if not valid_backup_name(backup_name):
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
             backup_name = f'backup_uploaded_{timestamp}'
         
-        backup_file = backup_dir / f'{backup_name}.sql.gz'
-        file.save(backup_file)
+        backup_file = directory / f'{backup_name}.sql.gz'
+        with publish_backup_file(backup_file) as staged:
+            file.save(staged)
         
         # Create metadata
         metadata = {
@@ -2368,8 +2296,8 @@ def upload_backup():
             'size_mb': backup_file.stat().st_size / (1024 * 1024)
         }
         
-        metadata_file = backup_dir / f'{backup_name}.json'
-        with open(metadata_file, 'w') as f:
+        metadata_file = directory / f'{backup_name}.json'
+        with publish_backup_file(metadata_file) as staged, staged.open('w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2)
         
         return jsonify({
@@ -2378,6 +2306,8 @@ def upload_backup():
             'backup': metadata
         })
         
+    except FileExistsError:
+        return jsonify({'success': False, 'error': 'A backup with this name already exists'}), 409
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
@@ -2572,18 +2502,7 @@ def list_docker_images():
 @admin_required
 def dynamic_flags_monitor():
     """Admin interface to monitor and verify dynamic flags for all active containers"""
-    from models.container import ContainerInstance
-    from services.cache import cache_service
-    
-    # Get all active containers (running or starting)
-    active_containers = ContainerInstance.query.filter(
-        ContainerInstance.status.in_(['starting', 'running'])
-    ).order_by(ContainerInstance.created_at.desc()).all()
-    
-    # Get all containers (including stopped) for verification history
-    all_containers = ContainerInstance.query.order_by(
-        ContainerInstance.created_at.desc()
-    ).limit(100).all()
+    active_containers = active_containers_query(request.args).all()
     
     # Build detailed container info with flag data
     container_data = []
@@ -2614,6 +2533,10 @@ def dynamic_flags_monitor():
                 'id': container.id,
                 'session_id': container.session_id,
                 'container_id': container.container_id,
+                'container_name': container.container_name,
+                'host_ip': container.host_ip,
+                'host_port': container.host_port,
+                'port': container.port,
                 'docker_image': container.docker_image or '',
                 'status': container.status,
                 'created_at': container.created_at.isoformat() if container.created_at else None,
@@ -2635,9 +2558,7 @@ def dynamic_flags_monitor():
                 'mapping': bool(cached_mapping),
                 'session': bool(session_cache)
             },
-            'is_consistent': (
-                container.dynamic_flag == expected_flag if expected_flag else True
-            ),
+            'is_consistent': len({flag for flag in (container.dynamic_flag, cached_mapping, session_cache) if flag}) <= 1,
             'remaining_time': container.get_remaining_time(),
             'is_expired': container.is_expired()
         })
@@ -2645,40 +2566,74 @@ def dynamic_flags_monitor():
     return render_template('admin/dynamic_flags.html', 
                          containers=container_data,
                          active_count=len(active_containers),
-                         total_count=len(all_containers))
+                         unique_count=len({row['expected_flag'] for row in container_data if row['expected_flag']}),
+                         flag_format_prefix=_flag_format_prefix(),
+                         challenges=Challenge.query.filter_by(docker_enabled=True).order_by(Challenge.name).all(),
+                         users=User.query.order_by(User.username).all(),
+                         teams=Team.query.order_by(Team.name).all(),
+                         filter_args=console_filter_args(request.args, 'challenge_id', 'user_id', 'team_id', 'status'))
 
 
 @admin_bp.route('/dynamic-flags/verify', methods=['POST'])
 @login_required
 @admin_required
 def verify_dynamic_flag():
-    """API endpoint to verify a submitted flag against a specific container"""
+    """Verify a flag against a container or a Docker challenge and its owner."""
+    import hmac
     from models.container import ContainerInstance
-    
-    data = request.get_json()
+    from utils.flag_hmac import generate_hmac_flag
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(success=False, error='Expected a JSON object'), 400
     container_id = data.get('container_id')
     submitted_flag = data.get('submitted_flag')
-    
-    if not container_id or not submitted_flag:
-        return jsonify({
-            'success': False,
-            'error': 'container_id and submitted_flag are required'
-        }), 400
-    
-    container = ContainerInstance.query.get(container_id)
-    if not container:
-        return jsonify({
-            'success': False,
-            'error': 'Container not found'
-        }), 404
-    
-    # Verify the flag
-    verification = container.verify_flag(submitted_flag)
-    
-    return jsonify({
-        'success': True,
-        'verification': verification,
-        'container': {
+    if not isinstance(submitted_flag, str) or not submitted_flag.strip():
+        return jsonify(success=False, error='Enter a flag to verify'), 400
+
+    container = None
+    if container_id is not None:
+        if type(container_id) is not int:
+            return jsonify(success=False, error='Invalid container ID'), 400
+        container = db.session.get(ContainerInstance, container_id)
+        if container is None:
+            return jsonify(success=False, error='Container not found'), 404
+        challenge, user, team_id = container.challenge, container.user, container.team_id
+        expected = container.get_expected_flag()
+    else:
+        user_id, challenge_id = data.get('user_id'), data.get('challenge_id')
+        if type(user_id) is not int or type(challenge_id) is not int:
+            return jsonify(success=False, error='Select a user and a Docker challenge'), 400
+        user, challenge = db.session.get(User, user_id), db.session.get(Challenge, challenge_id)
+        if not user or not challenge or not challenge.docker_enabled:
+            return jsonify(success=False, error='User or Docker challenge not found'), 404
+        team_id = user.team_id
+        owner = f'team_{team_id}' if team_id else f'user_{user.id}'
+        instances = ContainerInstance.query.filter_by(challenge_id=challenge.id, team_id=team_id)
+        if not team_id:
+            instances = instances.filter_by(user_id=user.id)
+        active = instances.filter(ContainerInstance.status.in_(('starting', 'running'))).order_by(
+            ContainerInstance.created_at.desc(), ContainerInstance.id.desc()
+        ).first()
+        expected = active.get_expected_flag() if active else None
+        if not expected:
+            expected = cache_service.get(f'dynamic_flag_mapping:{challenge.id}:{owner}')
+
+    if not expected and challenge and user:
+        prefix, separator, _ = challenge.flag.partition('{')
+        expected = generate_hmac_flag(challenge.id, team_id, user.id, prefix if separator else DEFAULT_FLAG_PREFIX)
+
+    submitted = submitted_flag.strip()
+    comparison = expected or ''
+    if challenge and not challenge.flag_case_sensitive:
+        comparison, submitted = comparison.lower(), submitted.lower()
+    result = {'success': True, 'verification': {
+        'valid': bool(expected) and hmac.compare_digest(comparison.encode(), submitted.encode()),
+        'expected': expected,
+        'submitted': submitted_flag,
+    }}
+    if container:
+        result['container'] = {
             'id': container.id,
             'challenge_name': container.challenge.name if container.challenge else 'Unknown',
             'team_name': container.team.name if container.team else 'Solo',
@@ -2686,7 +2641,7 @@ def verify_dynamic_flag():
             'status': container.status,
             'is_expired': container.is_expired()
         }
-    })
+    return jsonify(result)
 
 
 @admin_bp.route('/dynamic-flags/check-uniqueness', methods=['POST'])
@@ -2834,32 +2789,8 @@ def analyze_cheating():
 @login_required
 @admin_required
 def submissions():
-    from models.submission import Submission
-    from models.user import User
-    from models.challenge import Challenge
-
     page = request.args.get('page', 1, type=int)
-    challenge_id = request.args.get('challenge_id', None, type=int)
-    user_id = request.args.get('user_id', None, type=int)
-    correct_only = request.args.get('correct_only', None)
-
-    from sqlalchemy.orm import joinedload
-    from models.challenge import Challenge
-    challenge_type = request.args.get('challenge_type', '')
-    query = Submission.query.options(joinedload(Submission.user), joinedload(Submission.team), joinedload(Submission.challenge))
-    if challenge_type in ('dynamic', 'static'):
-        query = query.filter(Submission.challenge.has(Challenge.docker_enabled == (challenge_type == 'dynamic')))
-
-    if challenge_id:
-        query = query.filter(Submission.challenge_id == challenge_id)
-    if user_id:
-        query = query.filter(Submission.user_id == user_id)
-    if correct_only == '1':
-        query = query.filter(Submission.is_correct == True)
-    elif correct_only == '0':
-        query = query.filter(Submission.is_correct == False)
-
-    submissions = query.order_by(Submission.submitted_at.desc()).paginate(
+    submissions = submissions_query(request.args).paginate(
         page=page, per_page=50, error_out=False
     )
 
@@ -2870,47 +2801,23 @@ def submissions():
                            submissions=submissions,
                            challenges=challenges,
                            users=users,
-                           pagination_args={key: value for key, value in request.args.items() if key != 'page'})
+                           teams=Team.query.order_by(Team.name).all(),
+                           pagination_args=console_filter_args(
+                               request.args, 'challenge_id', 'user_id', 'team_id', 'correct_only',
+                               'challenge_type', 'start_date', 'end_date'
+                           ))
 
 
 @admin_bp.route('/submissions/export')
 @login_required
 @admin_required
 def export_submissions():
-    import csv
-    import io
-    from models.submission import Submission
-    from flask import Response
+    from utils.timezone import format_datetime
 
-    challenge_id = request.args.get('challenge_id', None, type=int)
-    user_id = request.args.get('user_id', None, type=int)
-    correct_only = request.args.get('correct_only', None)
-
-    from sqlalchemy.orm import joinedload
-    from models.challenge import Challenge
-    challenge_type = request.args.get('challenge_type', '')
-    query = Submission.query.options(joinedload(Submission.user), joinedload(Submission.team), joinedload(Submission.challenge))
-    if challenge_type in ('dynamic', 'static'):
-        query = query.filter(Submission.challenge.has(Challenge.docker_enabled == (challenge_type == 'dynamic')))
-    if challenge_id:
-        query = query.filter(Submission.challenge_id == challenge_id)
-    if correct_only == '1':
-        query = query.filter(Submission.is_correct == True)
-    elif correct_only == '0':
-        query = query.filter(Submission.is_correct == False)
-
-    if user_id:
-        query = query.filter(Submission.user_id == user_id)
-    subs = query.order_by(Submission.submitted_at.desc()).all()
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['ID', 'Time', 'Username', 'Team', 'Challenge', 'Challenge Type', 'Flag Submitted', 'Correct', 'IP Address'])
-
-    for s in subs:
-        writer.writerow([
+    rows = (
+        (
             s.id,
-            s.submitted_at.strftime('%Y-%m-%d %H:%M:%S') if s.submitted_at else '',
+            format_datetime(s.submitted_at) if s.submitted_at else '',
             s.user.username if s.user else s.user_id,
             s.team.name if s.team else '',
             s.challenge.name if s.challenge else s.challenge_id,
@@ -2918,11 +2825,9 @@ def export_submissions():
             s.submitted_flag,
             'Yes' if s.is_correct else 'No',
             s.ip_address or ''
-        ])
-
-    output.seek(0)
-    return Response(
-        output.getvalue(),
-        mimetype='text/csv',
-        headers={'Content-Disposition': 'attachment; filename=submissions.csv'}
+        )
+        for s in submissions_query(request.args)
     )
+    return csv_download('submissions', (
+        'ID', 'Time', 'Username', 'Team', 'Challenge', 'Challenge Type', 'Flag Submitted', 'Correct', 'IP Address',
+    ), rows)

@@ -2,15 +2,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const badge = document.getElementById('notifBadge');
     const list = document.getElementById('notifList');
     const toggle = document.getElementById('notificationsDropdown');
+    const status = document.getElementById('notificationStatus');
     if (!badge || !list || !toggle) return;
-    let unread = 0;
+    const deletedWhileLoading = new Set();
+    let loading = true;
     const updateBadge = () => {
+        const unread = list.querySelectorAll('[data-read="0"]').length;
         badge.textContent = unread;
+        badge.hidden = unread === 0;
+        if (status) status.textContent = unread ? `${unread} unread` : 'All caught up';
         const count = document.getElementById('announcementCount');
         if (count) count.textContent = unread ? `(${unread} unread)` : '';
         const latest = document.getElementById('latestAnnouncement');
         if (latest) latest.textContent = list.querySelector('strong')?.textContent || 'No announcements yet';
-        badge.style.display = unread ? '' : 'none';
         toggle.setAttribute('aria-label', `Notifications, ${unread} unread`);
     };
     const placeholder = message => {
@@ -20,7 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
         item.className = 'list-group-item text-muted'; item.textContent = message;
         list.append(item);
     };
-    function addItem(data) {
+    function addItem(data, live = false) {
         if (Array.from(list.children).some(item => item.dataset.notifId === String(data.id))) return;
         if (!list.querySelector('[data-notif-id]')) list.replaceChildren();
         const item = document.createElement('div');
@@ -32,7 +36,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const time = document.createElement('small'); time.className = 'text-muted';
         time.textContent = data.created_at ? new Date(data.created_at).toLocaleString() : 'Just now';
         const body = document.createElement('p'); body.className = 'mb-0'; body.textContent = data.body || '';
-        header.append(title, time); item.append(header, body); list.prepend(item);
+        header.append(title, time); item.append(header, body);
+        if (live) list.prepend(item);
+        else list.append(item);
     }
     async function markRead() {
         for (const item of list.querySelectorAll('[data-read="0"]')) {
@@ -41,7 +47,10 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 const response = await fetchWithCSRF(`/api/notifications/${encodeURIComponent(item.dataset.notifId)}/read`, { method: 'POST' });
                 const data = await response.json();
-                if (response.ok && data.success) { item.dataset.read = '1'; unread = Math.max(0, unread - 1); updateBadge(); }
+                if (response.ok && data.success && item.isConnected) {
+                    item.dataset.read = '1';
+                    updateBadge();
+                }
             } catch (_) { /* Retry on next open. */ }
             delete item.dataset.pending;
         }
@@ -62,11 +71,15 @@ document.addEventListener('DOMContentLoaded', () => {
         return response.json();
     }).then(data => {
         if (!data.success || !Array.isArray(data.notifications)) throw new Error('Invalid notifications');
-        unread = data.unread || 0; updateBadge();
-        data.notifications.slice().reverse().forEach(addItem);
+        for (const notification of data.notifications) {
+            if (!deletedWhileLoading.has(String(notification.id))) addItem(notification);
+        }
         placeholder('No notifications yet.'); updateBadge();
         if (toggle.getAttribute('aria-expanded') === 'true') markRead();
-    }).catch(() => placeholder('Notifications could not be loaded. Refresh to retry.'));
+    }).catch(() => placeholder('Notifications could not be loaded. Refresh to retry.')).finally(() => {
+        loading = false;
+        deletedWhileLoading.clear();
+    });
     toggle.addEventListener('shown.bs.dropdown', markRead);
     // REST notifications remain available when the live service is disconnected.
     if (typeof io !== 'function') return;
@@ -74,14 +87,14 @@ document.addEventListener('DOMContentLoaded', () => {
     socket.on('notification', data => {
         const exists = Array.from(list.children).some(item => item.dataset.notifId === String(data.id));
         if (exists) return;
-        addItem(data); unread += 1; updateBadge(); showToast(data);
+        addItem(data, true); updateBadge(); showToast(data);
         if (data.play_sound) document.getElementById('notificationSound')?.play().catch(() => {});
         if (toggle.getAttribute('aria-expanded') === 'true') markRead();
     });
     socket.on('notification_deleted', data => {
+        if (loading) deletedWhileLoading.add(String(data.id));
         const item = Array.from(list.children).find(item => item.dataset.notifId === String(data.id));
         if (!item) return;
-        if (item.dataset.read === '0') unread = Math.max(0, unread - 1);
         item.remove(); updateBadge(); placeholder('No notifications yet.');
     });
 });

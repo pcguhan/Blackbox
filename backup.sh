@@ -1,7 +1,11 @@
 #!/bin/bash
-set -e
+set -eo pipefail
+umask 077
 
-BACKUP_DIR="/var/backups/ctf"
+BACKUP_DIR="$(realpath -m -- "${BACKUP_DIR:-/var/backups/ctf}")" || exit 1
+case "${BACKUP_DIR}/" in
+    /var/uploads/*) echo "BACKUP_DIR must be outside /var/uploads" >&2; exit 1 ;;
+esac
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 BACKUP_NAME="backup_${TIMESTAMP}"
 BACKUP_PATH="${BACKUP_DIR}/${BACKUP_NAME}"
@@ -42,7 +46,7 @@ fi
 # Backup uploads directory
 echo "Backing up uploads..." | tee -a "${BACKUP_DIR}/backup.log"
 if [ -d "/var/uploads" ]; then
-    tar -czf "${BACKUP_PATH}/uploads.tar.gz" -C /var/uploads . 2>/dev/null || true
+    tar -czf "${BACKUP_PATH}/uploads.tar.gz" --exclude='./backups' -C /var/uploads . 2>/dev/null || true
     echo "Uploads backup completed" | tee -a "${BACKUP_DIR}/backup.log"
 else
     echo "No uploads directory found" | tee -a "${BACKUP_DIR}/backup.log"
@@ -88,9 +92,10 @@ echo "Total backup size: ${BACKUP_SIZE}" | tee -a "${BACKUP_DIR}/backup.log"
 echo "Cleaning up old backups..." | tee -a "${BACKUP_DIR}/backup.log"
 BACKUP_COUNT=$(find "${BACKUP_DIR}" -maxdepth 1 -type d -name "backup_*" | wc -l)
 if [ "${BACKUP_COUNT}" -gt "${MAX_BACKUPS}" ]; then
-    OLD_BACKUPS=$(find "${BACKUP_DIR}" -maxdepth 1 -type d -name "backup_*" | sort | head -n -${MAX_BACKUPS})
-    echo "${OLD_BACKUPS}" | xargs rm -rf
-    REMOVED_COUNT=$(echo "${OLD_BACKUPS}" | wc -l)
+    mapfile -d '' -t OLD_BACKUPS < <(find "${BACKUP_DIR}" -maxdepth 1 -type d -name "backup_*" -print0 |
+        sort -z | head -z -n "-${MAX_BACKUPS}")
+    rm -rf -- "${OLD_BACKUPS[@]}"
+    REMOVED_COUNT=${#OLD_BACKUPS[@]}
     echo "Removed ${REMOVED_COUNT} old backup(s)" | tee -a "${BACKUP_DIR}/backup.log"
 else
     echo "No old backups to remove (${BACKUP_COUNT}/${MAX_BACKUPS})" | tee -a "${BACKUP_DIR}/backup.log"

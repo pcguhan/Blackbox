@@ -1,0 +1,16 @@
+name: Example web challenge
+category: Web
+difficulty: easy
+author: Challenge team
+description: Read the response from your challenge instance.
+points: 100
+min_points: 50
+decay: 30
+flag_mode: dynamic
+flag_prefix: CYS
+# flag_path: /flag.txt
+# To use a fixed answer built into the app, set flag_mode: static and flag: CYS{example}.
+connection: "http://{host}:{port}"
+hints:
+  - content: Inspect the response headers.
+    cost: 10

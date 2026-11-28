@@ -6,15 +6,17 @@ services:
     user: "1001:${DOCKER_GID:-999}"  
     ports:
       - "8000:8000"
-      - "30000-30400:30000-30400"  
     environment:
       - FLASK_ENV=development
       - SECRET_KEY=${SECRET_KEY:-change-this-secret-key-in-production}
       - DATABASE_URL=mysql+pymysql://${DATABASE_USER:-blackbox_user}:${DATABASE_PASSWORD:-blackbox_password}@db:3306/${DATABASE_NAME:-ctf_platform}
       - REDIS_URL=redis://cache:6379/0
       - UPLOAD_FOLDER=/var/uploads
+      - BACKUP_DIR=${BACKUP_DIR:-/var/log/blackbox/backups}
       - CTF_NAME=${CTF_NAME:-BlackBox CTF}
-      - WORKERS=8
+      - WORKERS=${WORKERS:-1}
+      - CHALLENGE_HOST=${CHALLENGE_HOST:-}
+      - CHALLENGE_BIND_ADDRESS=${CHALLENGE_BIND_ADDRESS:-0.0.0.0}
       - LOG_FOLDER=/var/log/blackbox
       - REVERSE_PROXY=true
       - PROXY_FIX_X_FOR=1
@@ -136,11 +138,10 @@ services:
     command: |
       -c "
       apt-get update -qq && apt-get install -y -qq redis-tools cron > /dev/null 2>&1;
-      chmod +x /usr/local/bin/backup.sh /usr/local/bin/restore.sh;
-      echo '0 * * * * /usr/local/bin/backup.sh >> /var/backups/ctf/cron.log 2>&1' | crontab -;
+      echo '0 * * * * /bin/bash /usr/local/bin/backup.sh >> /var/backups/ctf/cron.log 2>&1' | crontab -;
       echo 'Backup service started. Automatic backups every hour.';
-      echo 'Manual backup: docker exec blackbox-backup /usr/local/bin/backup.sh';
-      echo 'Restore: docker exec blackbox-backup /usr/local/bin/restore.sh <backup_name>';
+      echo 'Manual backup: docker exec blackbox-backup /bin/bash /usr/local/bin/backup.sh';
+      echo 'Restore: docker exec blackbox-backup /bin/bash /usr/local/bin/restore.sh <backup_name>';
       cron && tail -f /var/backups/ctf/backup.log /var/backups/ctf/cron.log 2>/dev/null || sleep infinity
       "
 

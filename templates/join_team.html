@@ -3,11 +3,11 @@
 {% block title %}Join Team - {{ ctf_name }}{% endblock %}
 
 {% block content %}
-<div class="row justify-content-center">
+<div class="row justify-content-center team-page">
     <div class="col-md-8">
-        <h2 class="mb-4">
+        <h1 class="participant-heading mb-4">
             <i class="bi bi-people-fill"></i> Join a Team
-        </h2>
+        </h1>
         
         {% if not confirm %}
         <!-- Invite Code Input Form -->
@@ -21,18 +21,18 @@
                 </p>
                 
                 <form method="POST">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <div class="mb-3">
                         <label for="invite_code" class="form-label">
                             <i class="bi bi-key-fill"></i> Invite Code
                         </label>
-                        <input type="text" class="form-control form-control-lg text-uppercase" 
+                        <input type="text" class="form-control form-control-lg text-uppercase team-invite-code"
                                id="invite_code" name="invite_code" 
                                placeholder="XXXXXXXX" 
                                maxlength="8" 
                                pattern="[A-Za-z0-9]{8}"
-                               required 
-                               autofocus
-                               style="letter-spacing: 0.2em; font-weight: bold;">
+                               required
+                               autofocus>
                         <div class="form-text">
                             Enter the 8-character code (letters and numbers)
                         </div>

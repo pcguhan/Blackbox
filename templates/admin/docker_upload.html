@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+
+{% block title %}{{ 'Replace Docker image' if target else 'Upload Docker challenge' }} - {{ ctf_name }}{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-3">{% include 'admin/_sidebar.html' %}</div>
+    <div class="col-md-9">
+        <h1>{{ 'Replace Docker image' if target else 'Upload Docker challenge' }}</h1>
+        {% if target %}
+        <p>{{ target.name }} · Current image <code>{{ target.docker_image }}</code></p>
+        <p>Running instances keep their current image until restarted.</p>
+        {% elif targets %}
+        <form class="d-flex flex-wrap align-items-center gap-2 mb-3" method="get">
+            <label for="challenge-id">Existing Docker challenge</label>
+            <select class="form-select w-auto" id="challenge-id" name="challenge_id" required>
+                <option value="">Choose a challenge</option>
+                {% for challenge in targets %}<option value="{{ challenge.id }}">{{ challenge.name }}</option>{% endfor %}
+            </select>
+            <button class="btn btn-outline-primary" type="submit">Replace its image</button>
+        </form>
+        {% endif %}
+
+        <section class="card mb-3">
+            <div class="card-body">
+                <form id="docker-archive-form" method="post" enctype="multipart/form-data"
+                      action="{{ url_for('docker_upload.start_docker_upload') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <label for="archive" class="form-label">Docker archive</label>
+                    <input class="form-control" id="archive" name="archive" type="file"
+                           accept=".zip,.tar,.tar.gz,.tgz" aria-describedby="archive-help" required>
+                    <p id="archive-help" class="form-text">
+                        Use ZIP or tar. The request limit is {{ '%g'|format(upload_max_mib) }} MiB including form data.
+                    </p>
+                    <button class="btn btn-primary" type="submit">Upload archive</button>
+                    <progress id="docker-upload-progress" aria-label="Uploading archive" hidden></progress>
+                </form>
+                <details class="mt-3">
+                    <summary>Archive contents</summary>
+                    <p class="mt-2">Put a Dockerfile with an EXPOSE instruction at the archive root or in one top-level folder.
+                        An optional challenge.yml beside it fills in challenge details. You can also upload a tar archive
+                        made with docker save for a single image.</p>
+                    <p>Dynamic challenges should read the injected FLAG environment variable or the configured flag file.
+                        Static challenges should return the fixed flag built into the app. Keep solution notes outside the archive.</p>
+                    <a href="{{ url_for('static', filename='docker/challenge.yml.example') }}" download="challenge.yml">Download challenge.yml template</a>
+                </details>
+                <noscript><p class="mt-3">Enable JavaScript to upload an archive and view build progress.</p></noscript>
+            </div>
+        </section>
+
+        <p id="docker-upload-status" role="status" aria-live="polite"></p>
+        <pre id="docker-build-log" class="card p-3 overflow-auto" style="max-height: 20rem" tabindex="0"
+             aria-label="Docker build log" hidden></pre>
+
+        <section id="docker-image-details" class="card" hidden>
+            <div class="card-body">
+                <p><strong>Image</strong> <code id="docker-image"></code></p>
+                <p><strong>Exposed ports</strong> <code id="docker-ports"></code></p>
+                <ul id="docker-warnings" hidden></ul>
+                <form id="docker-challenge-form" method="post"
+                      data-test="{{ url_for('docker_upload.test_docker_upload', job_id='JOB_ID') }}"
+                      data-action="{{ url_for('docker_upload.replace_challenge_image', job_id='JOB_ID', challenge_id=target.id) if target else url_for('docker_upload.create_challenge_from_docker_upload', job_id='JOB_ID') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    {% if target %}
+                    <p><label><input type="checkbox" name="confirm" value="true" required> Confirm replacement for {{ target.name }}</label></p>
+                    {% else %}
+                    <div class="row g-3 mb-3">
+                        {% for field, label, limit in [('name', 'Name', 100), ('category', 'Category', 50), ('author', 'Author', 100)] %}
+                        <div class="col-md-6">
+                            <label class="form-label" for="{{ field }}">{{ label }}</label>
+                            <input class="form-control" id="{{ field }}" name="{{ field }}" maxlength="{{ limit }}" {% if field != 'author' %}required{% endif %}>
+                        </div>
+                        {% endfor %}
+                        <div class="col-md-6">
+                            <label class="form-label" for="difficulty">Difficulty</label>
+                            <select class="form-select" id="difficulty" name="difficulty">
+                                <option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option>
+                            </select>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label" for="description">Description</label>
+                            <textarea class="form-control" id="description" name="description" rows="4" maxlength="16000" required></textarea>
+                        </div>
+                        {% for field, label, value in [('initial_points', 'Initial points', 500), ('minimum_points', 'Minimum points', 50), ('decay_solves', 'Solves to minimum', 30)] %}
+                        <div class="col-md-4">
+                            <label class="form-label" for="{{ field }}">{{ label }}</label>
+                            <input class="form-control" id="{{ field }}" name="{{ field }}" type="number" min="1" max="2147483647" value="{{ value }}" required>
+                        </div>
+                        {% endfor %}
+                        <div class="col-md-6">
+                            <label class="form-label" for="flag_mode">Flag mode</label>
+                            <select class="form-select" id="flag_mode" name="flag_mode">
+                                <option value="dynamic">Dynamic (per team or solo player)</option>
+                                <option value="static">Static</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6" id="docker-prefix-field">
+                            <label class="form-label" for="flag_prefix">Flag prefix</label>
+                            <input class="form-control" id="flag_prefix" name="flag_prefix" pattern="[A-Za-z0-9_]{1,32}" value="{{ default_flag_prefix }}">
+                        </div>
+                        <div class="col-md-6" id="docker-static-flag-field" hidden>
+                            <label class="form-label" for="flag">Static flag</label>
+                            <input class="form-control" id="flag" name="flag" maxlength="255" disabled>
+                        </div>
+                        <div class="col-md-6" id="docker-flag-path-field">
+                            <label class="form-label" for="docker_flag_path">Flag file path (optional)</label>
+                            <input class="form-control" id="docker_flag_path" name="docker_flag_path" placeholder="/flag.txt" maxlength="256">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="docker_connection_info">Connection template</label>
+                            <input class="form-control" id="docker_connection_info" name="docker_connection_info" maxlength="512" required>
+                        </div>
+                        <div class="col-12 d-flex flex-wrap gap-3">
+                            <label><input type="checkbox" name="is_visible" value="true"> Visible to players</label>
+                            <label><input type="checkbox" name="is_dynamic" value="true" checked> Dynamic scoring</label>
+                            <label><input type="checkbox" name="requires_team" value="true"> Requires a team</label>
+                        </div>
+                    </div>
+                    <fieldset class="mb-3">
+                        <legend class="h5">Hints</legend>
+                        <div id="docker-hints"></div>
+                        <button class="btn btn-outline-secondary" id="docker-add-hint" type="button">Add hint</button>
+                    </fieldset>
+                    <template id="docker-hint-row">
+                        <div class="d-flex flex-wrap align-items-end gap-2 mb-2">
+                            <label class="flex-grow-1">Hint <input class="form-control" name="hint_content[]" maxlength="16000" required></label>
+                            <label>Cost <input class="form-control" name="hint_cost[]" type="number" min="0" max="2147483647" value="0" required></label>
+                            <button class="btn btn-outline-secondary" type="button">Remove hint</button>
+                        </div>
+                    </template>
+                    {% endif %}
+                    <button class="btn btn-primary" type="submit">{{ 'Replace Docker image' if target else 'Create challenge' }}</button>
+                    <button class="btn btn-outline-secondary" id="docker-test" type="button">Test image</button>
+                    <p class="mt-2 mb-0" id="docker-test-result" role="status"></p>
+                </form>
+            </div>
+        </section>
+    </div>
+</div>
+
+<script>
+(() => {
+    const upload = document.getElementById('docker-archive-form');
+    const details = document.getElementById('docker-image-details');
+    const challenge = document.getElementById('docker-challenge-form');
+    const status = document.getElementById('docker-upload-status');
+    const log = document.getElementById('docker-build-log');
+    const progress = document.getElementById('docker-upload-progress');
+    const submit = upload.querySelector('button[type="submit"]');
+    const test = document.getElementById('docker-test');
+    const testResult = document.getElementById('docker-test-result');
+    const mode = challenge.elements.flag_mode;
+    let jobId;
+
+    const wait = () => new Promise(resolve => setTimeout(resolve, 1000));
+    async function requestJson(url, options) {
+        const response = await fetch(url, options);
+        const result = response.headers.get('content-type')?.includes('application/json') ? await response.json() : {};
+        if (!response.ok || response.redirected) {
+            throw new Error(result.error || (response.status === 413 ? 'The archive exceeds the upload limit.' : 'The request failed. Check your session and try again.'));
+        }
+        return result;
+    }
+
+    function showFlagFields() {
+        const isStatic = mode.value === 'static';
+        document.getElementById('docker-prefix-field').hidden = isStatic;
+        document.getElementById('docker-flag-path-field').hidden = isStatic;
+        document.getElementById('docker-static-flag-field').hidden = !isStatic;
+        challenge.elements.flag_prefix.disabled = isStatic;
+        challenge.elements.docker_flag_path.disabled = isStatic;
+        challenge.elements.flag.disabled = !isStatic;
+        challenge.elements.flag.required = isStatic;
+    }
+
+    function addHint(hint = {content: '', cost: 0}) {
+        const container = document.getElementById('docker-hints');
+        if (container.childElementCount >= 100) return;
+        const row = document.getElementById('docker-hint-row').content.firstElementChild.cloneNode(true);
+        const [content, cost] = row.querySelectorAll('input');
+        content.value = hint.content;
+        cost.value = hint.cost;
+        row.querySelector('button').addEventListener('click', () => row.remove());
+        container.append(row);
+    }
+
+    if (mode) {
+        mode.addEventListener('change', showFlagFields);
+        document.getElementById('docker-add-hint').addEventListener('click', () => addHint());
+    }
+
+    function showImage(job) {
+        document.getElementById('docker-image').textContent = job.image;
+        document.getElementById('docker-ports').textContent = job.exposed_ports.join(', ');
+        const warnings = document.getElementById('docker-warnings');
+        warnings.replaceChildren(...job.warnings.map(message => {
+            const item = document.createElement('li');
+            item.textContent = message;
+            return item;
+        }));
+        warnings.hidden = !job.warnings.length;
+        challenge.reset();
+        if (mode) {
+            const fields = {...job.manifest};
+            const port = job.exposed_ports[0].split('/')[0];
+            fields.connection ||= ['80', '8080', '3000', '5000'].includes(port) ? 'http://{host}:{port}' : 'nc {host} {port}';
+            fields.min_points ??= Math.min(fields.points ?? 500, 50);
+            const inputs = {
+                points: 'initial_points', min_points: 'minimum_points', decay: 'decay_solves',
+                flag_path: 'docker_flag_path', connection: 'docker_connection_info'
+            };
+            document.getElementById('docker-hints').replaceChildren();
+            for (const [field, value] of Object.entries(fields)) {
+                if (field === 'hints') value.forEach(addHint);
+                else challenge.elements.namedItem(inputs[field] || field).value = value;
+            }
+            showFlagFields();
+        }
+        challenge.action = challenge.dataset.action.replace('JOB_ID', jobId);
+        details.hidden = false;
+    }
+
+    upload.addEventListener('submit', async event => {
+        event.preventDefault();
+        submit.disabled = true;
+        progress.hidden = false;
+        details.hidden = log.hidden = true;
+        testResult.textContent = log.textContent = '';
+        status.textContent = 'Uploading and checking archive…';
+        try {
+            const result = await requestJson(upload.action, {method: 'POST', body: new FormData(upload)});
+            jobId = result.job_id;
+            const url = upload.action + '/' + jobId;
+            progress.hidden = true;
+            for (;;) {
+                const job = await requestJson(url);
+                log.textContent = job.log.join('\n');
+                log.hidden = !job.log.length;
+                if (job.status === 'error') throw new Error(job.error);
+                if (job.status === 'done') {
+                    showImage(job);
+                    status.textContent = 'Image ready.';
+                    break;
+                }
+                status.textContent = {queued: 'Queued…', building: 'Building image…', loading: 'Loading image…'}[job.status];
+                await wait();
+            }
+        } catch (error) {
+            status.textContent = error.message;
+        } finally {
+            submit.disabled = false;
+            progress.hidden = true;
+        }
+    });
+
+    test.addEventListener('click', async () => {
+        test.disabled = submit.disabled = true;
+        testResult.textContent = 'Checking flag injection…';
+        try {
+            const payload = new FormData();
+            payload.append('csrf_token', challenge.elements.csrf_token.value);
+            payload.append('docker_connection_info', challenge.elements.docker_connection_info?.value || '');
+            const result = await requestJson(challenge.dataset.test.replace('JOB_ID', jobId), {method: 'POST', body: payload});
+            testResult.textContent = result.flag_verified
+                ? 'Docker supplied FLAG to the test container. The container was removed.'
+                : 'Could not verify FLAG inside the test container. The container was removed.';
+        } catch (error) {
+            testResult.textContent = error.message;
+        } finally {
+            test.disabled = submit.disabled = false;
+        }
+    });
+})();
+</script>
+{% endblock %}

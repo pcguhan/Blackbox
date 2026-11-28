@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Profile - {{ ctf_name }}{% endblock %}
 {% block content %}
+{% set team = user.get_team() %}
 <header class="profile-heading">
     <div><p class="eyebrow">Your account</p><h1>Profile</h1><p class="text-muted mb-0">Account details and your challenge history.</p></div>
     <a class="btn btn-outline-primary" href="{{ url_for('challenges.list_challenges') }}">Open challenges</a>
@@ -10,15 +11,16 @@
         <div class="profile-identity"><div><h2>{{ user.username }}</h2><span class="text-muted">{{ 'Administrator' if user.is_admin else 'Participant' }}</span></div></div>
         <dl class="profile-details">
             {% if user.full_name %}<div><dt>Full name</dt><dd>{{ user.full_name }}</dd></div>{% endif %}
+            {% if user.nickname is defined and user.nickname %}<div><dt>Nickname</dt><dd>{{ user.nickname }}</dd></div>{% endif %}
             <div><dt>Email</dt><dd>{{ user.email }}</dd></div>
             <div><dt>Joined</dt><dd>{{ user.created_at|format_datetime('%d %b %Y') if user.created_at else 'Unknown' }}</dd></div>
-            <div><dt>Team membership</dt><dd>{{ 'Team member' if user.team_id else 'No team joined' }}</dd></div>
+            <div><dt>Team</dt><dd>{{ team.name if team else 'No team joined' }}</dd></div>
         </dl>
-        {% if user.team_id %}<a class="btn btn-outline-primary" href="{{ url_for('teams.view_team', team_id=user.team_id) }}">View my team</a>{% endif %}
+        {% if team %}<a class="btn btn-outline-primary" href="{{ url_for('teams.view_team', team_id=team.id) }}">View my team</a>{% endif %}
     </aside>
     <section class="profile-progress" aria-label="Challenge progress">
         <dl class="profile-metrics">
-            <div><dt>{{ 'Team points' if user.team_id else 'Total points' }}</dt><dd>{{ progress.total_score }}</dd><small>Current score, including adjustments and hint costs</small></div>
+            <div><dt>{{ 'Team points' if team else 'Total points' }}</dt><dd>{{ progress.total_score }}</dd><small>Current score, including adjustments and hint costs</small></div>
             <div><dt>Your challenges solved</dt><dd>{{ progress.solves|length }}</dd><small>Challenges you have personally completed</small></div>
         </dl>
         <section class="profile-history" aria-labelledby="history-title">

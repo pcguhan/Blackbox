@@ -1,16 +1,20 @@
 import gevent.monkey
 gevent.monkey.patch_all()
 
-from flask import Flask, render_template, send_from_directory, send_file, abort
-from flask_login import LoginManager
+from flask import Flask, render_template, send_from_directory, send_file, abort, flash, redirect, request, url_for
+from flask_login import LoginManager, current_user, login_required
 from flask.json.provider import DefaultJSONProvider
 from config import config
 from models import db
 from models.user import User
+from scripts.schema_backups import ensure_profile_schema
 from services.cache import cache_service
 from services.websocket import WebSocketService, socketio
 from services.file_storage import file_storage
-from security_utils import init_security
+from services.backup_paths import init_backup_paths
+from routes.profile_settings import profile_settings_bp
+from routes.admin_versions import admin_versions_bp
+from security_utils import CSRFProtection, init_security
 import os
 from decimal import Decimal
 
@@ -32,6 +36,7 @@ def create_app(config_name=None):
     
     app = Flask(__name__, static_folder=static_folder, static_url_path='/static')
     app.config.from_object(config[config_name])
+    init_backup_paths(app)
     
     # Set custom JSON provider
     app.json = DecimalJSONProvider(app)
@@ -69,27 +74,82 @@ def create_app(config_name=None):
     @login_manager.user_loader
     def load_user(user_id):
         return User.query.get(int(user_id))
+
+    @app.before_request
+    @CSRFProtection.csrf_protect()
+    def protect_admin_routes():
+        if request.path == '/admin' or request.path.startswith('/admin/'):
+            if not current_user.is_authenticated:
+                return login_manager.unauthorized()
+            if not current_user.is_admin:
+                if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+                    abort(403)
+                flash('Admin access required', 'error')
+                return redirect(url_for('index'))
     
     # Register blueprints
     from routes.auth import auth_bp
+    from routes.auth_admin import auth_admin_bp
+    from routes.auth_google import auth_google_bp
     from routes.challenges import challenges_bp
     from routes.teams import teams_bp
     from routes.scoreboard import scoreboard_bp
     from routes.admin import admin_bp
+    from routes.access_admin import access_admin_bp
+    from routes.adminui_exports import adminui_bp
     from routes.notifications import notifications_bp
     from routes.setup import setup_bp
     from routes.hints import hints_bp
     from routes.container import container_bp
+    from routes.appearance_admin import appearance_admin_bp
+    from routes.docker_upload import docker_upload_bp
+    from routes.guide import guide_bp
     
     app.register_blueprint(setup_bp)
     app.register_blueprint(auth_bp)
+    app.register_blueprint(auth_admin_bp)
+    app.register_blueprint(auth_google_bp)
     app.register_blueprint(challenges_bp)
     app.register_blueprint(teams_bp)
     app.register_blueprint(scoreboard_bp)
     app.register_blueprint(admin_bp)
+    app.register_blueprint(access_admin_bp)
+    app.register_blueprint(adminui_bp)
     app.register_blueprint(notifications_bp)
     app.register_blueprint(hints_bp)
     app.register_blueprint(container_bp)
+
+    @app.before_request
+    def recheck_session_access():
+        from flask import flash, g, jsonify, redirect, request, url_for
+        from flask_login import current_user, logout_user
+        from services.exclusive_access import BLOCKED_MESSAGE, DEACTIVATED_MESSAGE, enforce_for_user
+
+        if current_user.is_anonymous or enforce_for_user(current_user):
+            return None
+
+        message = BLOCKED_MESSAGE if current_user.is_active else DEACTIVATED_MESSAGE
+        g.access_revoked = True
+        logout_user()
+        if '/api/' in request.path or request.accept_mimetypes.best == 'application/json':
+            return jsonify(success=False, message=message), 403
+        flash(message, 'error')
+        return redirect(url_for('auth.login'))
+
+    @app.after_request
+    def prevent_caching_signed_in_responses(response):
+        from flask import g
+        from flask_login import current_user
+
+        if response.mimetype == 'text/html' or response.is_json:
+            if current_user.is_authenticated or g.get('access_revoked'):
+                response.headers['Cache-Control'] = 'no-store'
+        return response
+    app.register_blueprint(appearance_admin_bp)
+    app.register_blueprint(docker_upload_bp)
+    app.register_blueprint(profile_settings_bp)
+    app.register_blueprint(admin_versions_bp)
+    app.register_blueprint(guide_bp)
     
     # Setup check middleware
     @app.before_request
@@ -136,45 +196,48 @@ def create_app(config_name=None):
         """Serve uploaded logo files from /var/uploads/logos"""
         logos_folder = app.config['LOGO_UPLOAD_FOLDER']
         try:
-            return send_from_directory(logos_folder, filename)
+            response = send_from_directory(logos_folder, filename)
+            response.headers['Content-Security-Policy'] = "default-src 'none'; img-src 'self'; sandbox"
+            return response
         except FileNotFoundError:
             abort(404)
     
     @app.route('/files/<path:filename>')
+    @login_required
     def serve_file(filename):
         """Serve uploaded files with original filename"""
         from models.file import ChallengeFile
-        import os
-        from urllib.parse import quote
-        
-        upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
-        
-        normalized_path = filename.replace('/', os.sep)
-        file_record = ChallengeFile.query.filter_by(relative_path=normalized_path).first()
-        if not file_record: 
-            file_record = ChallengeFile.query.filter_by(relative_path=filename).first()
-        
-        file_path = os.path.realpath(os.path.join(upload_folder, normalized_path))
-        if not file_path.startswith(os.path.realpath(upload_folder) + os.sep):
-            abort(403)
-        
-        if not os.path.exists(file_path):
-            app.logger.warning(f"File not found: {file_path}")
+        from services.challenge_catalog import is_challenge_visible
+
+        if '\\' in filename or ':' in filename or any(part in ('', '.', '..') for part in filename.split('/')):
             abort(404)
-        
-        if file_record and file_record.original_filename:
-            download_filename = file_record.original_filename
-            app.logger.info(f"Found DB record: {download_filename}")
-        else:
-            download_filename = os.path.basename(file_path)
-            app.logger.warning(f"No DB record, using: {download_filename}")
-        
-        return send_file(
+
+        file_record = ChallengeFile.query.filter(
+            ChallengeFile.relative_path.in_((filename, filename.replace('/', '\\')))
+        ).first()
+        if not file_record or not is_challenge_visible(file_record.challenge, current_user):
+            abort(404)
+
+        upload_folder = os.path.realpath(app.config.get('UPLOAD_FOLDER', 'uploads'))
+        stored_path = file_record.relative_path.replace('\\', '/')
+        file_path = os.path.realpath(os.path.join(upload_folder, stored_path))
+        legacy_backups = os.path.realpath(os.path.join(upload_folder, 'backups'))
+        if (not file_path.startswith(upload_folder + os.sep) or not os.path.isfile(file_path)
+                or file_path.startswith(legacy_backups + os.sep) or stored_path.split('/', 1)[0] == 'backups'):
+            abort(404)
+
+        if (file_record.original_filename or '').rstrip(' .').casefold() == 'solution.md':
+            abort(404)
+
+        response = send_file(
             file_path,
             as_attachment=True,
-            download_name=download_filename,
-            mimetype=file_record.mime_type if file_record and file_record.mime_type else 'application/octet-stream'
+            download_name=file_record.original_filename,
+            mimetype=file_record.mime_type or 'application/octet-stream'
         )
+        response.cache_control.private = True
+        response.cache_control.no_store = True
+        return response
     
     @app.route('/favicon.ico')
     def favicon():
@@ -187,11 +250,15 @@ def create_app(config_name=None):
     
     @app.errorhandler(404)
     def not_found(error):
+        if request.path == '/admin' or request.path.startswith('/admin/'):
+            return render_template('admin/_error.html', status=404), 404
         return render_template('errors/404.html'), 404
     
     @app.errorhandler(500)
     def internal_error(error):
         db.session.rollback()
+        if request.path == '/admin' or request.path.startswith('/admin/'):
+            return render_template('admin/_error.html', status=500), 500
         return render_template('errors/500.html'), 500
     
     @app.route('/health')
@@ -309,9 +376,18 @@ if not app.testing:
         try:
             from scripts.db_schema import ensure_docker_schema
             ensure_docker_schema()
+            ensure_profile_schema()
             app.logger.info("Ensured docker DB schema and defaults")
         except Exception as e:
             app.logger.warning(f"Could not ensure docker DB schema on startup: {e}")
+
+        from scripts.schema_scoring import ensure_scoring_schema
+        ensure_scoring_schema()
+        try:
+            from scripts.schema_auth import ensure_auth_schema
+            ensure_auth_schema()
+        except Exception as e:
+            app.logger.warning(f"Could not ensure authentication DB schema on startup: {e}")
 
     # Initialize container reconciliation background task
     try:

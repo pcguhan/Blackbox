@@ -1,14 +1,8 @@
-{% extends "base.html" %}
+{% extends "admin/_layout.html" %}
 
 {% block title %}CTF Control - Admin - {{ ctf_name }}{% endblock %}
 
-{% block content %}
-<div class="row">
-    <div class="col-md-3">
-        {% include 'admin/_sidebar.html' %}
-    </div>
-    
-    <div class="col-md-9">
+{% block admin_content %}
         <h2 class="mb-4">
             <i class="bi bi-clock-history"></i> CTF Control Panel
         </h2>
@@ -72,6 +66,7 @@
                     <div class="col-md-6 mb-3">
                         {% if ctf_settings.is_paused %}
                         <form method="POST" class="d-inline">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <input type="hidden" name="action" value="resume">
                             <button type="submit" class="btn btn-success w-100 btn-lg">
                                 <i class="bi bi-play-fill"></i> Resume CTF
@@ -80,6 +75,7 @@
                         <small class="text-muted d-block mt-2">Enable submissions and allow users to compete</small>
                         {% else %}
                         <form method="POST" class="d-inline" onsubmit="return confirm('Are you sure you want to pause the CTF? All submissions will be disabled.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <input type="hidden" name="action" value="pause">
                             <button type="submit" class="btn btn-warning w-100 btn-lg">
                                 <i class="bi bi-pause-fill"></i> Pause CTF
@@ -90,6 +86,7 @@
                     </div>
                     <div class="col-md-6 mb-3">
                         <form method="POST" onsubmit="return confirm('Clear all scheduling? CTF will run continuously.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <input type="hidden" name="action" value="clear_times">
                             <button type="submit" class="btn btn-secondary w-100 btn-lg">
                                 <i class="bi bi-x-circle"></i> Clear Schedule
@@ -108,6 +105,7 @@
             </div>
             <div class="card-body">
                 <form method="POST">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="action" value="set_times">
                     
                     <div class="alert alert-info">
@@ -178,6 +176,5 @@
                 </ul>
             </div>
         </div>
-    </div>
-</div>
+
 {% endblock %}

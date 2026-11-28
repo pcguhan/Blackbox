@@ -77,11 +77,16 @@ class Config:
     # Server
     HOST = os.getenv('HOST', '0.0.0.0')
     PORT = int(os.getenv('PORT', 5000))
+    CHALLENGE_HOST = os.getenv('CHALLENGE_HOST', '').strip()
+    CHALLENGE_BIND_ADDRESS = os.getenv('CHALLENGE_BIND_ADDRESS', '0.0.0.0')
     
     # File Upload
     UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads'))
+    BACKUP_DIR = os.getenv('BACKUP_DIR')
+    AVATAR_UPLOAD_FOLDER = os.getenv('AVATAR_UPLOAD_FOLDER', os.path.join(UPLOAD_FOLDER, 'avatars'))
+    AVATAR_MAX_BYTES = 2 * 1024 * 1024
     LOGO_UPLOAD_FOLDER = os.getenv('LOGO_UPLOAD_FOLDER', os.path.join(UPLOAD_FOLDER, 'logos'))
-    MAX_CONTENT_LENGTH = int(os.getenv('MAX_UPLOAD_SIZE', 50 * 1024 * 1024))  # 50MB default
+    MAX_CONTENT_LENGTH = int(os.getenv('MAX_UPLOAD_SIZE', 50 * 1024 * 1024))  # Keep in sync with nginx client_max_body_size.
     ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'zip', 
                          'tar', 'gz', 'bz2', '7z', 'rar', 'exe', 'bin', 
                          'pcap', 'pcapng', 'cap', 'py', 'c', 'cpp', 'java',
@@ -99,6 +104,11 @@ class Config:
     # These headers are managed by security_utils.py
     # Additional security settings can be added here
     
+    # Google sign-in
+    GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
+    GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
+    GOOGLE_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', '')
+
     # Email
     MAIL_SERVER = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
     MAIL_PORT = int(os.getenv('MAIL_PORT', 587))

@@ -1,20 +1,38 @@
-{% extends "base.html" %}
+{% extends "admin/_layout.html" %}
+{% from "admin/_macros.html" import entity_filter, filter_actions, page_heading, role_badge with context %}
 
 {% block title %}Manage Users - Admin - {{ ctf_name }}{% endblock %}
 
-{% block content %}
-<div class="row">
-    <div class="col-md-3">
-        {% include 'admin/_sidebar.html' %}
-    </div>
-    
-    <div class="col-md-9">
-        <div class="d-flex justify-content-between align-items-center mb-4">
-            <h2 class="mb-0">
-                <i class="bi bi-people"></i> Users
-            </h2>
-            <span class="text-muted">Total: {{ users|length }}</span>
-        </div>
+{% block admin_content %}
+        {% call page_heading('Users', 'people') %}
+        <span>{{ users|length }} matching {{ 'user' if users|length == 1 else 'users' }}</span>
+        {% endcall %}
+
+        <form method="get" class="admin-filter-panel" aria-label="Filter users">
+            {% if 'user_id' in filter_args %}<input type="hidden" name="user_id" value="{{ filter_args.user_id }}">{% endif %}
+            <div>
+                <label for="filter-q" class="form-label">Search users</label>
+                <input type="search" class="form-control" id="filter-q" name="q" value="{{ request.args.get('q', '') }}">
+            </div>
+            {{ entity_filter('team_id', 'Team', teams) }}
+            <div>
+                <label for="filter-role" class="form-label">Role</label>
+                <select class="form-select" id="filter-role" name="role">
+                    <option value="">Any</option>
+                    <option value="admin" {{ 'selected' if request.args.get('role') == 'admin' }}>Admins</option>
+                    <option value="player" {{ 'selected' if request.args.get('role') == 'player' }}>Players</option>
+                </select>
+            </div>
+            <div>
+                <label for="filter-status" class="form-label">Status</label>
+                <select class="form-select" id="filter-status" name="status">
+                    <option value="">Any</option>
+                    <option value="active" {{ 'selected' if request.args.get('status') == 'active' }}>Active</option>
+                    <option value="disabled" {{ 'selected' if request.args.get('status') == 'disabled' }}>Disabled</option>
+                </select>
+            </div>
+            {{ filter_actions('admin.manage_users', 'adminui.export_users', filter_args) }}
+        </form>
         
         {% if users %}
         <div class="card">
@@ -28,14 +46,15 @@
                                 <th>Email</th>
                                 <th>Team</th>
                                 <th>Score</th>
-                                <th>Admin</th>
+                                <th>Role</th>
                                 <th>Status</th>
                                 <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody>
                             {% for user in users %}
-                            <tr id="user-{{ user.id }}">
+                            <tr id="user-{{ user.id }}" data-role="{{ 'admin' if user.is_admin else 'player' }}"
+                                data-status="{{ 'active' if user.is_active else 'disabled' }}">
                                 <td>
                                     <strong>{{ user.username }}</strong>
                                     {% if user.is_team_captain %}
@@ -73,15 +92,12 @@
                                     </button>
                                 </td>
                                 <td>
-                                    <span class="badge {% if user.is_admin %}bg-danger{% else %}bg-secondary{% endif %}" 
-                                          id="admin-badge-{{ user.id }}">
-                                        {{ 'Yes' if user.is_admin else 'No' }}
-                                    </span>
+                                    {{ role_badge(user.is_admin, user.id) }}
                                 </td>
                                 <td>
                                     <span class="badge {% if user.is_active %}bg-success{% else %}bg-warning{% endif %}" 
                                           id="status-badge-{{ user.id }}">
-                                        {{ 'Active' if user.is_active else 'Inactive' }}
+                                        {{ 'Active' if user.is_active else 'Disabled' }}
                                     </span>
                                 </td>
                                 <td>
@@ -90,13 +106,13 @@
                                                 onclick="toggleAdmin({{ user.id }})" 
                                                 title="Toggle Admin"
                                                 {% if user.id == current_user.id %}disabled{% endif %}>
-                                            <i class="bi bi-shield"></i>
+                                            <i class="bi bi-shield" aria-hidden="true"></i>
                                         </button>
                                         <button type="button" class="btn btn-outline-warning" 
                                                 onclick="toggleActive({{ user.id }})" 
                                                 title="Toggle Active"
                                                 {% if user.id == current_user.id %}disabled{% endif %}>
-                                            
+                                            <i class="bi bi-person-check" aria-hidden="true"></i>
                                         </button>
                                     </div>
                                 </td>
@@ -109,11 +125,10 @@
         </div>
         {% else %}
         <div class="alert alert-info">
-            <i class="bi bi-info-circle"></i> No users registered yet.
+            <i class="bi bi-info-circle" aria-hidden="true"></i> No users match these filters.
         </div>
         {% endif %}
-    </div>
-</div>
+
 
 <!-- Score Management Modal -->
 <div class="modal fade" id="scoreModal" tabindex="-1">
@@ -359,8 +374,13 @@ function toggleAdmin(userId) {
     .then(data => {
         if (data.success) {
             const badge = document.getElementById(`admin-badge-${userId}`);
-            badge.textContent = data.is_admin ? 'Yes' : 'No';
-            badge.className = `badge ${data.is_admin ? 'bg-danger' : 'bg-secondary'}`;
+            const icon = badge.querySelector('i');
+            icon.className = data.is_admin ? 'bi bi-shield-fill' : 'bi bi-person-fill';
+            badge.replaceChildren(icon, document.createTextNode(data.is_admin ? 'Admin' : 'Player'));
+            badge.classList.toggle('is-admin', data.is_admin);
+            badge.classList.toggle('is-player', !data.is_admin);
+            document.getElementById(`user-${userId}`).dataset.role = data.is_admin ? 'admin' : 'player';
+            if (document.querySelector('#filter-role').value) window.location.reload();
             showFlash(data.message, 'success');
         } else {
             showFlash(data.message || 'Error updating admin status', 'danger');
@@ -383,8 +403,10 @@ function toggleActive(userId) {
     .then(data => {
         if (data.success) {
             const badge = document.getElementById(`status-badge-${userId}`);
-            badge.textContent = data.is_active ? 'Active' : 'Inactive';
+            badge.textContent = data.is_active ? 'Active' : 'Disabled';
             badge.className = `badge ${data.is_active ? 'bg-success' : 'bg-warning'}`;
+            document.getElementById(`user-${userId}`).dataset.status = data.is_active ? 'active' : 'disabled';
+            if (document.querySelector('#filter-status').value) window.location.reload();
             showFlash(data.message, 'success');
         } else {
             showFlash(data.message || 'Error updating user status', 'danger');

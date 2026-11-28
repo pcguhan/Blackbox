@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% set heading = 'Page not found' if status == 404 else 'Something went wrong' %}
+{% block title %}{{ status }} {{ heading }} · {{ ctf_name }}{% endblock %}
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/admin-console.css') }}">
+{% endblock %}
+
+{% block content %}
+<section class="admin-error" aria-labelledby="admin-error-title">
+    <span class="admin-error-code">{{ status }}</span>
+    <h1 id="admin-error-title">{{ heading }}</h1>
+    <p>{{ 'The requested admin page could not be found.' if status == 404 else 'The server could not complete this request. Try again in a moment.' }}</p>
+    {% if current_user.is_authenticated and current_user.is_admin %}
+    <a class="btn btn-primary" href="{{ url_for('admin.dashboard') }}">Back to dashboard</a>
+    {% else %}
+    <a class="btn btn-primary" href="{{ url_for('index') }}">Back to home</a>
+    {% endif %}
+</section>
+{% endblock %}

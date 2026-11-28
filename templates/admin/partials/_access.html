@@ -1,0 +1,44 @@
+<section class="card mb-4" id="exclusive-access" aria-labelledby="exclusive-access-heading">
+    <div class="card-header">
+        <h5 id="exclusive-access-heading" class="mb-0">Exclusive Access</h5>
+    </div>
+    <div class="card-body">
+        <p>When enabled, only active administrators and participants with a listed email can sign in or stay signed in.</p>
+        <form class="mb-3" method="post" action="{{ url_for('access_admin.update_allowlist') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <p class="mb-2">Exclusive Access is <strong>{{ 'on' if exclusive_access_enabled else 'off' }}</strong>.</p>
+            <button class="btn btn-outline-primary" type="submit" name="action" value="{{ 'disable' if exclusive_access_enabled else 'enable' }}">
+                {{ 'Disable' if exclusive_access_enabled else 'Enable' }} Exclusive Access
+            </button>
+        </form>
+        <form class="mb-3" method="post" action="{{ url_for('access_admin.update_allowlist') }}" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label class="form-label" for="allowlist-file">Email allowlist</label>
+            <input class="form-control" id="allowlist-file" name="allowlist_file" type="file" accept=".csv,.xlsx" aria-describedby="allowlist-limits" required>
+            <div id="allowlist-limits" class="form-text">Use a CSV or XLSX file up to 5 MB and 20,000 rows.</div>
+            <div class="form-check my-2">
+                <input class="form-check-input" type="checkbox" name="keep_existing" id="allowlist-append">
+                <label class="form-check-label" for="allowlist-append">Append to the existing list</label>
+            </div>
+            <button class="btn btn-primary" type="submit" name="action" value="upload">Upload allowlist</button>
+        </form>
+        <h6>Listed emails ({{ access_page.total }})</h6>
+        {% if access_page.items %}
+        <ul>
+            {% for entry in access_page.items %}<li>{{ entry.email }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% if access_page.has_prev %}
+        <a class="btn btn-sm btn-outline-secondary mb-3" href="{{ url_for('admin.settings', access_page=access_page.prev_num, _anchor='exclusive-access') }}">Previous emails</a>
+        {% endif %}
+        {% if access_page.has_next %}
+        <a class="btn btn-sm btn-outline-secondary mb-3" href="{{ url_for('admin.settings', access_page=access_page.next_num, _anchor='exclusive-access') }}">Next emails</a>
+        {% endif %}
+        {% if access_page.total %}
+        <form method="post" action="{{ url_for('access_admin.update_allowlist') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-outline-danger" type="submit" name="action" value="clear">Clear allowlist</button>
+        </form>
+        {% endif %}
+    </div>
+</section>
