@@ -330,13 +330,38 @@ class DockerSettings(db.Model):
             return []
         return [r.strip() for r in self.allowed_repositories.split('\n') if r.strip()]
     
+    @staticmethod
+    def image_matches(image_name, entry):
+        """Match an image reference against one allowlist entry.
+
+        - ``registry/ns/`` (trailing slash): any repository under that namespace.
+        - an entry containing ``*``, ``?`` or ``[``: shell-style glob, e.g. ``ctf-*``.
+        - otherwise an exact repository (``trusted/image`` allows
+          ``trusted/image:tag`` and ``trusted/image@sha256:...`` but not
+          ``trusted/image-malicious``), or an exact ``repo:tag``.
+        """
+        import fnmatch
+        image_name = (image_name or '').strip()
+        entry = (entry or '').strip()
+        if not image_name or not entry:
+            return False
+        repo = image_name.split('@', 1)[0]
+        last = repo.rsplit('/', 1)[-1]
+        if ':' in last:
+            repo = repo[:len(repo) - len(last)] + last.split(':', 1)[0]
+        if entry.endswith('/'):
+            return repo.startswith(entry)
+        if any(ch in entry for ch in '*?['):
+            return fnmatch.fnmatchcase(image_name, entry) or fnmatch.fnmatchcase(repo, entry)
+        return repo == entry or image_name == entry
+
     def is_image_allowed(self, image_name):
         """Check if an image is in the allowed repositories"""
         allowed = self.get_allowed_repositories_list()
         if not allowed:
             return True  # No whitelist = allow all
-        
-        return any(image_name.startswith(repo) for repo in allowed)
+
+        return any(self.image_matches(image_name, repo) for repo in allowed)
     
     def to_dict(self):
         """Convert to dictionary (excluding sensitive data)"""

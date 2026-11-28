@@ -36,6 +36,16 @@ def create_app(config_name=None):
     
     app = Flask(__name__, static_folder=static_folder, static_url_path='/static')
     app.config.from_object(config[config_name])
+
+    if config_name == 'production':
+        # Refuse to start with a missing or placeholder signing key: it would make
+        # session cookies, email/reset tokens and dynamic flags forgeable.
+        from config import INSECURE_SECRETS
+        secret_key = app.config.get('SECRET_KEY') or ''
+        if secret_key in INSECURE_SECRETS or len(secret_key) < 16:
+            raise RuntimeError('SECRET_KEY is missing or a placeholder; set a long random SECRET_KEY for production.')
+        if os.getenv('FLAG_HMAC_SECRET', '') in INSECURE_SECRETS:
+            raise RuntimeError('FLAG_HMAC_SECRET is missing or a placeholder; set a long random value for production.')
     init_backup_paths(app)
     
     # Set custom JSON provider

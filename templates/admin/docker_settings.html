@@ -181,11 +181,13 @@
                     <h5 class="mb-0"> Allowed Repositories</h5>
                 </div>
                 <div class="card-body">
-                    <label for="allowed_repositories" class="form-label fw-bold">Repository Prefixes (one per line)</label>
+                    <label for="allowed_repositories" class="form-label fw-bold">Allowed Repositories (one per line)</label>
                     <textarea class="form-control" id="allowed_repositories" name="allowed_repositories" 
                               rows="6" placeholder="registry.example.com/ctf/&#10;dockerhub/myrepo/">{{ docker_settings.allowed_repositories or '' }}</textarea>
                     <div class="form-text">
-                        Only images with these prefixes will be available. Leave empty to allow all images.
+                        <code>registry.example.com/ctf/</code> (trailing slash) allows that whole namespace;
+                        <code>ctf-*</code> is a wildcard; <code>myrepo/web</code> allows exactly that repository (any tag).
+                        Leave empty to allow all images.
                     </div>
                 </div>
             </div>

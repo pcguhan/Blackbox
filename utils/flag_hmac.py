@@ -14,8 +14,21 @@ def dynamic_flag_prefix(challenge):
     return (prefix if brace else '') or DEFAULT_FLAG_PREFIX
 
 
+_PLACEHOLDER_SECRETS = {'', 'change-me-in-env', 'change-this-in-env', 'change-this-to-a-long-random-secret'}
+
+
+def _master_secret():
+    secret = os.environ.get('FLAG_HMAC_SECRET', '')
+    if secret in _PLACEHOLDER_SECRETS:
+        # A known secret lets anyone compute other teams' dynamic flags.
+        if os.environ.get('FLASK_ENV', 'development') == 'production':
+            raise RuntimeError('FLAG_HMAC_SECRET is missing or a placeholder; refusing to sign dynamic flags')
+        secret = secret or 'change-me-in-env'
+    return secret.encode()
+
+
 def _challenge_key(challenge_id):
-    secret = os.environ.get('FLAG_HMAC_SECRET', 'change-me-in-env').encode()
+    secret = _master_secret()
     return hmac.digest(secret, f'challenge:{challenge_id}'.encode(), hashlib.sha256)
 
 

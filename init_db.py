@@ -66,7 +66,7 @@ def init_database(with_sample_data=True):
         Settings.set('teams_enabled', True, 'bool', 'Enable teams feature (for solo competitions)')
         Settings.set('first_blood_bonus', 15, 'int', 'Bonus points for first blood (first solve)')
         Settings.set('allow_registration', True, 'bool', 'Allow new user registrations')
-        Settings.set('team_mode', False, 'bool', 'Require teams to solve challenges')
+        Settings.set('require_team_for_challenges', False, 'bool', 'Require teams to solve challenges')
         Settings.set('scoreboard_visible', True, 'bool', 'Show scoreboard to users')
         print("✓ Default settings initialized")
         

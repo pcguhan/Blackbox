@@ -121,6 +121,13 @@ class DevelopmentConfig(Config):
     TESTING = False
     SESSION_COOKIE_SECURE = False  # Allow HTTP in development
 
+# Placeholder secrets that must never be used outside development/testing.
+INSECURE_SECRETS = {
+    '', 'dev-secret-key-change-in-production', 'change-this-secret-key-in-production',
+    'change-this-to-a-long-random-string-in-production', 'change-this-in-env',
+    'change-this-to-a-long-random-secret', 'change-me-in-env',
+}
+
 class ProductionConfig(Config):
     """Production configuration"""
     DEBUG = False

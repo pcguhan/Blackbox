@@ -56,6 +56,15 @@ class BackupScheduler:
             logger.info("Automatic backups are disabled")
             return
         
+        # Run in the event's configured timezone, not the server's.
+        try:
+            from utils.timezone import get_platform_timezone
+            tz = get_platform_timezone()
+        except Exception as e:
+            logger.warning(f"Could not read platform timezone, using UTC: {e}")
+            import pytz
+            tz = pytz.UTC
+
         # Schedule based on frequency
         if frequency == 'hourly':
             self.scheduler.add_job(
@@ -63,6 +72,7 @@ class BackupScheduler:
                 'cron',
                 minute=0,  # Every hour at :00
                 id='auto_backup',
+                timezone=tz,
                 replace_existing=True
             )
             logger.info("Automatic backups scheduled: Every hour at :00")
@@ -74,6 +84,7 @@ class BackupScheduler:
                 hour=2,
                 minute=0,  # Daily at 2:00 AM
                 id='auto_backup',
+                timezone=tz,
                 replace_existing=True
             )
             logger.info("Automatic backups scheduled: Daily at 2:00 AM")
@@ -86,6 +97,7 @@ class BackupScheduler:
                 hour=2,
                 minute=0,  # Sunday at 2:00 AM
                 id='auto_backup',
+                timezone=tz,
                 replace_existing=True
             )
             logger.info("Automatic backups scheduled: Weekly on Sunday at 2:00 AM")
@@ -98,6 +110,7 @@ class BackupScheduler:
                 hour=2,
                 minute=0,  # 1st day of month at 2:00 AM
                 id='auto_backup',
+                timezone=tz,
                 replace_existing=True
             )
             logger.info("Automatic backups scheduled: Monthly on 1st at 2:00 AM")
@@ -159,33 +172,12 @@ class BackupScheduler:
                     rows = cursor.fetchall()
                     
                     if rows:
+                        from services.backup_sql import insert_statement
                         cursor.execute(f"DESCRIBE `{table}`")
                         columns = [col[0] for col in cursor.fetchall()]
-                        column_list = ', '.join([f'`{col}`' for col in columns])
-                        
-                        sql_dump.append(f"INSERT INTO `{table}` ({column_list}) VALUES")
-                        
-                        for i, row in enumerate(rows):
-                            values = []
-                            for value in row:
-                                if value is None:
-                                    values.append('NULL')
-                                elif isinstance(value, (int, float)):
-                                    values.append(str(value))
-                                elif isinstance(value, bytes):
-                                    values.append(f"'{value.decode('utf-8', errors='replace')}'")
-                                else:
-                                    # Escape single quotes
-                                    escaped = str(value).replace("'", "''")
-                                    values.append(f"'{escaped}'")
-                            
-                            row_sql = f"({', '.join(values)})"
-                            if i < len(rows) - 1:
-                                row_sql += ","
-                            else:
-                                row_sql += ";"
-                            sql_dump.append(row_sql)
-                
+                        for row in rows:
+                            sql_dump.append(insert_statement(table, columns, row))
+
                 sql_dump.append("\nSET FOREIGN_KEY_CHECKS=1;")
                 
                 cursor.close()

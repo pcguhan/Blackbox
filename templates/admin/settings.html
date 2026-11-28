@@ -42,9 +42,9 @@
             {% for key, label in [
                 ('allow_registration', 'Allow user registration'),
                 ('teams_enabled', 'Enable team registration and scoring'),
-                ('team_mode', 'Require teams to solve challenges')
+                ('require_team_for_challenges', 'Require teams to solve challenges')
             ] %}
-            {{ setting_switch(key, label, settings.get(key, true)) }}
+            {{ setting_switch(key, label, settings.get(key, key != 'require_team_for_challenges')) }}
             {% endfor %}
             <button type="submit" class="btn btn-primary mt-3">Save event settings</button>
         </form>

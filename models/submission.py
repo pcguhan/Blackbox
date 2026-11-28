@@ -66,9 +66,12 @@ class Solve(db.Model):
     # Timestamp
     solved_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     
-    # Unique constraint: one solve per user/team per challenge
+    # One solve per team per challenge, and one per user *per team*: a user who
+    # solved for team A can still solve for team B after switching. Solo rows
+    # (team_id NULL) are de-duplicated by the submit path under the challenge
+    # row lock and the per-entrant solve lock.
     __table_args__ = (
-        db.UniqueConstraint('user_id', 'challenge_id', name='unique_user_challenge'),
+        db.UniqueConstraint('user_id', 'team_id', 'challenge_id', name='unique_user_team_challenge'),
         db.UniqueConstraint('team_id', 'challenge_id', name='unique_team_challenge'),
     )
     

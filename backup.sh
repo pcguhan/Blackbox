@@ -45,9 +45,17 @@ fi
 
 # Backup uploads directory
 echo "Backing up uploads..." | tee -a "${BACKUP_DIR}/backup.log"
+BACKUP_ERRORS=0
 if [ -d "/var/uploads" ]; then
-    tar -czf "${BACKUP_PATH}/uploads.tar.gz" --exclude='./backups' -C /var/uploads . 2>/dev/null || true
-    echo "Uploads backup completed" | tee -a "${BACKUP_DIR}/backup.log"
+    if tar -czf "${BACKUP_PATH}/uploads.tar.gz" --exclude='./backups' -C /var/uploads . 2>>"${BACKUP_DIR}/backup.log"; then
+        echo "Uploads backup completed" | tee -a "${BACKUP_DIR}/backup.log"
+    else
+        TAR_RC=$?
+        # Never keep (or report) a partial archive as a good uploads backup.
+        rm -f "${BACKUP_PATH}/uploads.tar.gz"
+        echo "✗ Uploads backup FAILED (tar exit ${TAR_RC}); uploads not included" | tee -a "${BACKUP_DIR}/backup.log"
+        BACKUP_ERRORS=1
+    fi
 else
     echo "No uploads directory found" | tee -a "${BACKUP_DIR}/backup.log"
 fi
@@ -102,8 +110,12 @@ else
 fi
 
 echo "===========================================" | tee -a "${BACKUP_DIR}/backup.log"
-echo "Backup completed successfully: ${BACKUP_NAME}" | tee -a "${BACKUP_DIR}/backup.log"
+if [ "${BACKUP_ERRORS}" -ne 0 ]; then
+    echo "Backup completed WITH ERRORS: ${BACKUP_NAME} (see above)" | tee -a "${BACKUP_DIR}/backup.log"
+else
+    echo "Backup completed successfully: ${BACKUP_NAME}" | tee -a "${BACKUP_DIR}/backup.log"
+fi
 echo "Location: ${BACKUP_PATH}" | tee -a "${BACKUP_DIR}/backup.log"
 echo "===========================================" | tee -a "${BACKUP_DIR}/backup.log"
 
-exit 0
+exit "${BACKUP_ERRORS}"

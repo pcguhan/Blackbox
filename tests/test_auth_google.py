@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import re
 import time
 from types import SimpleNamespace
 import unittest
@@ -285,8 +286,9 @@ class GoogleLogin(unittest.TestCase):
     def test_google_accounts_cannot_add_a_local_password_via_smtp_reset(self):
         self.assertEqual(self.callback().location, '/challenges/')
         self.client.get('/logout')
-        with app.app_context():
-            token = generate_confirmation_token(STUDENT_EMAIL)
+        with app.test_request_context():
+            from utils.email import generate_password_reset_token
+            token = generate_password_reset_token(User.query.filter_by(email=STUDENT_EMAIL).one())
         with patch('gevent.spawn') as send:
             post(self.client, '/forgot-password', {'email': STUDENT_EMAIL})
             send.assert_not_called()
@@ -377,7 +379,7 @@ class LocalAuthPolicy(unittest.TestCase):
         email = 'new@example.test'
         registration = {'username': 'new_local', 'email': email, 'password': FIXTURE_PASSWORD,
                         'confirm_password': FIXTURE_PASSWORD}
-        with patch('gevent.spawn') as send:
+        with patch('gevent.spawn') as send, patch('routes.auth.email_configured', return_value=True):
             self.assertEqual(post(self.client, '/register', registration).location, '/login')
             unverified = post(self.client, '/login', {'username': 'new_local', 'password': FIXTURE_PASSWORD})
             self.assertIn(b'Resend Verification Email', unverified.data)
@@ -390,6 +392,9 @@ class LocalAuthPolicy(unittest.TestCase):
             self.assertEqual(self.client.get(f'/verify-email/{token}').location, '/login')
             self.assertEqual(post(self.client, '/forgot-password', {'email': email}).location, '/login')
             self.assertEqual(send.call_args.args[2:4], (email, 'Password Reset Request'))
+            # Reset links carry their own token; the verification token is not accepted.
+            self.assertEqual(post(self.client, f'/reset-password/{token}', {}).location, '/login')
+            token = re.search(r'/reset-password/([^"]+)"', send.call_args.args[4]).group(1)
 
         new_password = 'NewPassword123'
         form = {'password': new_password, 'confirm_password': new_password}

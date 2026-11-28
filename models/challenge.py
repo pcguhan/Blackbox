@@ -66,9 +66,15 @@ class Challenge(db.Model):
         return ScoringService.calculate_dynamic_points(self)
 
     def get_solves_count(self):
-        """Count participant solves for this challenge across recorded owners."""
-        from models.submission import Solve
-        return Solve.participant_solves().filter(Solve.challenge_id == self.id).count()
+        """Count ranked entrants that solved this challenge in the current mode.
+
+        Teams enabled: distinct teams (solo solves are not ranked, so they never
+        lower the value or take first blood). Teams disabled: distinct users.
+        """
+        from models.settings import Settings
+        from services.scoring import ScoringService
+        team_based = Settings.get('teams_enabled', True, type='bool')
+        return ScoringService.get_challenge_solve_counts(team_based, challenge_id=self.id).get(self.id, 0)
 
     def get_submissions_count(self):
         """Get total number of submissions"""

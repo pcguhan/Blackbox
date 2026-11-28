@@ -6,7 +6,8 @@ from datetime import datetime
 from utils.audit import log_audit_event
 from utils.identity import local_next
 import re
-from utils.email import send_email, generate_confirmation_token, verify_token
+from utils.email import (send_email, generate_confirmation_token, verify_token, EMAIL_CONFIRM_SALT,
+                         generate_password_reset_token, verify_password_reset_token, email_configured)
 from flask import current_app
 from services.exclusive_access import BLOCKED_MESSAGE, DEACTIVATED_MESSAGE, enforce_for_user, is_email_allowed
 from services.auth_policy import (
@@ -14,6 +15,55 @@ from services.auth_policy import (
 )
 
 auth_bp = Blueprint('auth', __name__)
+
+# In-app throttling, so login is protected however the app is reached (Nginx,
+# Caddy, or a direct port). Per-IP mirrors Nginx's 20 r/m login zone;
+# per-username failures stop distributed guessing against one account.
+LOGIN_IP_LIMIT, LOGIN_IP_WINDOW = 20, 60
+LOGIN_FAIL_LIMIT, LOGIN_FAIL_WINDOW = 10, 900
+EMAIL_ACTION_LIMIT, EMAIL_ACTION_WINDOW = 5, 900
+
+
+def _throttled(key, limit, window):
+    """True if ``key`` exceeded ``limit`` hits in ``window`` seconds. Fails open if Redis is down."""
+    from services.cache import cache_service
+    try:
+        allowed, _ = cache_service.check_rate_limit(key, limit=limit, window=window)
+        return not allowed
+    except Exception as exc:
+        current_app.logger.warning(f"Rate limiter unavailable ({exc}); allowing request")
+        return False
+
+
+def _login_fail_key(username):
+    return f'login_fail:{username.lower()}'
+
+
+def _login_failures_exceeded(username):
+    from services.cache import cache_service
+    try:
+        return int(cache_service.redis_client.get(_login_fail_key(username)) or 0) >= LOGIN_FAIL_LIMIT
+    except Exception:
+        return False
+
+
+def _record_login_failure(username):
+    from services.cache import cache_service
+    try:
+        pipe = cache_service.redis_client.pipeline()
+        pipe.incr(_login_fail_key(username))
+        pipe.expire(_login_fail_key(username), LOGIN_FAIL_WINDOW)
+        pipe.execute()
+    except Exception:
+        pass
+
+
+def _clear_login_failures(username):
+    from services.cache import cache_service
+    try:
+        cache_service.redis_client.delete(_login_fail_key(username))
+    except Exception:
+        pass
 
 
 @auth_bp.before_app_request
@@ -53,10 +103,16 @@ def login():
         if not username or not password:
             flash('Please fill in all fields', 'error')
             return _login_page()
-        
+
+        if _throttled(f'login_ip:{request.remote_addr}', LOGIN_IP_LIMIT, LOGIN_IP_WINDOW) or _login_failures_exceeded(username):
+            log_audit_event(action='LOGIN_THROTTLED', details={'username': username})
+            flash('Too many login attempts. Please wait a few minutes and try again.', 'error')
+            return _login_page(), 429
+
         user = User.query.filter_by(username=username).first()
-        
+
         if user and user.password_hash != NO_LOCAL_PASSWORD and user.check_password(password):
+            _clear_login_failures(username)
             if google_only() and not user.is_admin:
                 flash(GOOGLE_ONLY_MESSAGE, 'error')
                 return _login_page()
@@ -89,6 +145,7 @@ def login():
             else:
                 return redirect(url_for('challenges.list_challenges'))
         else:
+            _record_login_failure(username)
             log_audit_event(action='LOGIN_FAILED', details={'username': username})
             flash('Invalid username or password', 'error')
     
@@ -178,7 +235,11 @@ def register():
         # Send verification email if required
         from models.settings import Settings
         require_verification = Settings.get('require_email_verification', True)
-        if require_verification:
+        if require_verification and not email_configured():
+            current_app.logger.error("Verification email not sent: SMTP is not configured")
+            flash('Registration successful, but this server cannot send email yet, so no verification '
+                  'email was sent. Please contact an administrator to verify your account.', 'warning')
+        elif require_verification:
             try:
                 token = generate_confirmation_token(user.email)
                 base_url = Settings.get('base_url', '')
@@ -238,7 +299,7 @@ def profile():
 
 @auth_bp.route('/verify-email/<token>')
 def verify_email(token):
-    email = verify_token(token, salt='email-confirm-salt')
+    email = verify_token(token, salt=EMAIL_CONFIRM_SALT)
     if not email:
         flash('The verification link is invalid or has expired.', 'error')
         return redirect(url_for('auth.login'))
@@ -264,8 +325,13 @@ def resend_verification():
     if google_only():
         return _google_only_redirect()
     email = request.form.get('email')
+    if _throttled(f'email_action_ip:{request.remote_addr}', EMAIL_ACTION_LIMIT, EMAIL_ACTION_WINDOW):
+        flash('Too many requests. Please wait a few minutes and try again.', 'error')
+        return redirect(url_for('auth.login'))
     user = User.query.filter_by(email=email).first()
-    if user and not getattr(user, 'is_verified', True):
+    if user and not getattr(user, 'is_verified', True) and not email_configured():
+        flash('This server cannot send email yet. Please contact an administrator to verify your account.', 'warning')
+    elif user and not getattr(user, 'is_verified', True):
         token = generate_confirmation_token(user.email)
         from models.settings import Settings
         base_url = Settings.get('base_url', '')
@@ -295,9 +361,14 @@ def forgot_password():
         
     if request.method == 'POST':
         email = request.form.get('email')
+        if _throttled(f'email_action_ip:{request.remote_addr}', EMAIL_ACTION_LIMIT, EMAIL_ACTION_WINDOW):
+            flash('Too many requests. Please wait a few minutes and try again.', 'error')
+            return redirect(url_for('auth.login'))
         user = User.query.filter_by(email=email).first()
-        if user and user.password_hash != NO_LOCAL_PASSWORD:
-            token = generate_confirmation_token(user.email)
+        if user and user.password_hash != NO_LOCAL_PASSWORD and not email_configured():
+            current_app.logger.error("Password reset email not sent: SMTP is not configured")
+        elif user and user.password_hash != NO_LOCAL_PASSWORD:
+            token = generate_password_reset_token(user)
             from models.settings import Settings
             base_url = Settings.get('base_url', '')
             if base_url:
@@ -324,13 +395,14 @@ def reset_password(token):
     if current_user.is_authenticated:
         return redirect(url_for('index'))
         
-    email = verify_token(token, salt='email-confirm-salt')
-    if not email:
-        flash('The password reset link is invalid or has expired.', 'error')
+    # Reset tokens use their own salt (a verification token is rejected here)
+    # and embed a password fingerprint, so each one works only once.
+    user = verify_password_reset_token(token)
+    if not user:
+        flash('The password reset link is invalid, expired or has already been used.', 'error')
         return redirect(url_for('auth.login'))
-        
-    user = User.query.filter_by(email=email).first()
-    if user and user.password_hash == NO_LOCAL_PASSWORD:
+
+    if user.password_hash == NO_LOCAL_PASSWORD:
         flash('This account signs in with Google.', 'info')
         return redirect(url_for('auth.login'))
 

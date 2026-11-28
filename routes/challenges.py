@@ -199,53 +199,36 @@ def view_challenge(challenge_id):
     
     challenge_data['unlocked_paths'] = unlocked_paths
     
-    # Get list of solvers (users/teams who solved this challenge)
-    solvers = []
-    from models.settings import Settings
-    teams_enabled = Settings.get('teams_enabled', True)
-    team_mode = Settings.get('team_mode', False)
-    
-    if team_mode:
-        # Team mode: show teams that solved
-        team_solves = Solve.query.filter(
-            Solve.challenge_id == challenge_id,
-            Solve.team_id.isnot(None)
-        ).order_by(Solve.solved_at).all()
-        
-        seen_teams = set()
-        for solve in team_solves:
-            if solve.team_id and solve.team_id not in seen_teams:
-                seen_teams.add(solve.team_id)
-                from models.team import Team
-                team_obj = Team.query.get(solve.team_id)
-                if team_obj:
-                    solvers.append({
-                        'name': team_obj.name,
-                        'is_team': True,
-                        'solved_at': solve.solved_at
-                    })
-    else:
-        # Solo mode: show users that solved
-        user_solves = Solve.query.filter(
-            Solve.challenge_id == challenge_id,
-            Solve.user_id.isnot(None)
-        ).order_by(Solve.solved_at).all()
-        
-        seen_users = set()
-        for solve in user_solves:
-            if solve.user_id and solve.user_id not in seen_users:
-                seen_users.add(solve.user_id)
-                user_obj = User.query.get(solve.user_id)
-                if user_obj:
-                    solvers.append({
-                        'name': user_obj.username,
-                        'is_team': False,
-                        'solved_at': solve.solved_at
-                    })
+    # Solvers use the scoreboard's mode (teams_enabled) and, during a freeze,
+    # only solves made before it, so challenge pages cannot leak post-freeze solves.
+    from services.standings import frozen_snapshot, team_standings_enabled
+    from models.team import Team
+    team_mode = team_standings_enabled()
+    owner_column = Solve.team_id if team_mode else Solve.user_id
+    solve_query = Solve.participant_solves().filter(Solve.challenge_id == challenge_id, owner_column.is_not(None))
+    if not team_mode:
+        solve_query = solve_query.filter(User.is_admin.is_not(True))
+    snapshot = frozen_snapshot()
+    if snapshot and not current_user.is_admin:
+        frozen_at = datetime.fromisoformat(snapshot['at'].rstrip('Z'))
+        solve_query = solve_query.filter(Solve.solved_at <= frozen_at)
+
+    solvers, seen = [], set()
+    for solve in solve_query.order_by(Solve.solved_at).all():
+        owner_id = solve.team_id if team_mode else solve.user_id
+        if owner_id in seen:
+            continue
+        seen.add(owner_id)
+        owner = db.session.get(Team if team_mode else User, owner_id)
+        name = (owner.name if team_mode else owner.username) if owner else None
+        if name:
+            solvers.append({'name': name, 'is_team': team_mode, 'solved_at': solve.solved_at})
     
     challenge_data['solvers'] = solvers
     challenge_data['solver_count'] = len(solvers)
-    
+    if snapshot and not current_user.is_admin:
+        challenge_data['solves'] = len(solvers)  # pre-freeze count, like the solver list
+
     return render_template('challenge_detail.html', 
                           challenge=challenge_data, 
                           files=files_data,
@@ -293,9 +276,10 @@ def submit_flag(challenge_id):
             return _submit_participant_flag(challenge_id, submitted_flag, team_id)
         except IntegrityError as error:
             detail = str(error.orig).lower()
-            if any(key in detail for key in ('unique_team_challenge', 'unique_user_challenge',
+            if any(key in detail for key in ('unique_team_challenge', 'unique_user_team_challenge', 'unique_user_challenge',
                                              'solves.team_id, solves.challenge_id',
-                                             'solves.user_id, solves.challenge_id')):
+                                             'solves.user_id, solves.challenge_id',
+                                             'solves.user_id, solves.team_id, solves.challenge_id')):
                 return jsonify({'success': False, 'message': 'This challenge has already been solved'}), 400
             raise
         finally:
@@ -639,7 +623,10 @@ def _submit_participant_flag(challenge_id, submitted_flag, team_id):
         if not already_solved:
             solve_count = challenge.get_solves_count()
             previous_points = ScoringService.calculate_dynamic_points(challenge, solve_count=solve_count)
-            is_first_blood = solve_count == 0
+            # First blood goes to the first ranked entrant: with teams enabled a
+            # solo solve neither takes nor blocks it.
+            ranked = bool(team_id) or not Settings.get('teams_enabled', True, type='bool')
+            is_first_blood = ranked and solve_count == 0
             override = getattr(matched_flag, 'points_override', None)
             base_points = ScoringService.calculate_dynamic_points(challenge, solve_count=solve_count + 1)
             points = ScoringService.solve_award(

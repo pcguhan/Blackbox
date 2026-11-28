@@ -9,7 +9,13 @@ from models.submission import Solve
 
 
 def participant_scope(model, user):
-    """Match progress belonging to the player's current team or solo entry."""
+    """Match progress belonging to the player's current team or solo entry.
+
+    In individual mode (teams disabled) a stored team_id is ignored and only
+    the user's own records count, matching how submissions and scoring work.
+    """
+    if not Settings.get('teams_enabled', True, type='bool'):
+        return model.user_id == user.id
     if user.team_id is not None:
         return model.team_id == user.team_id
     return db.and_(model.team_id.is_(None), model.user_id == user.id)

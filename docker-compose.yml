@@ -5,10 +5,14 @@ services:
     restart: unless-stopped  
     user: "1001:${DOCKER_GID:-999}"  
     ports:
-      - "8000:8000"
+      # Loopback only: public traffic must go through the reverse proxy
+      # (Nginx/Caddy), which owns TLS and rate limiting. The app trusts
+      # X-Forwarded-For (PROXY_FIX_X_FOR=1), so a public direct port would also
+      # let clients spoof their IP. Proxies reach the app as blackbox:8000.
+      - "127.0.0.1:8000:8000"
     environment:
-      - FLASK_ENV=development
-      - SECRET_KEY=${SECRET_KEY:-change-this-secret-key-in-production}
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - SECRET_KEY=${SECRET_KEY:?Set SECRET_KEY in .env (python -c "import secrets; print(secrets.token_hex(32))")}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
@@ -26,7 +30,7 @@ services:
       - PROXY_FIX_X_PROTO=1
       - PROXY_FIX_X_HOST=1
       - PROXY_FIX_X_PREFIX=1
-      - FLAG_HMAC_SECRET=${FLAG_HMAC_SECRET:-change-this-in-env}
+      - FLAG_HMAC_SECRET=${FLAG_HMAC_SECRET:?Set FLAG_HMAC_SECRET in .env}
       - PUBLIC_IP=${PUBLIC_IP:-localhost}
     volumes:
       - .:/opt/blackbox:ro
@@ -38,10 +42,12 @@ services:
         condition: service_healthy
       cache:
         condition: service_healthy
+    # Not attached to the challenge network, so instances cannot reach the app
+    # directly. The app creates "ctf_challenges" itself with inter-container
+    # traffic disabled (services/container_manager.py).
     networks:
       default:
       internal:
-      challenge_network: 
     healthcheck:
       test: ["CMD", "curl", "-f", "--max-time", "10", "http://localhost:8000/health"]
       interval: 20s
@@ -141,7 +147,9 @@ services:
     command: |
       -c "
       apt-get update -qq && apt-get install -y -qq redis-tools cron > /dev/null 2>&1;
-      echo '0 * * * * /bin/bash /usr/local/bin/backup.sh >> /var/backups/ctf/cron.log 2>&1' | crontab -;
+      export -p | grep -E ' (DATABASE_USER|DATABASE_PASSWORD|DATABASE_NAME|DB_HOST|MAX_BACKUPS|MYSQL_ROOT_PASSWORD)=' > /etc/backup.env;
+      chmod 600 /etc/backup.env;
+      { echo 'SHELL=/bin/bash'; echo '0 * * * * . /etc/backup.env && /bin/bash /usr/local/bin/backup.sh >> /var/backups/ctf/cron.log 2>&1'; } | crontab -;
       echo 'Backup service started. Automatic backups every hour.';
       echo 'Manual backup: docker exec blackbox-backup /bin/bash /usr/local/bin/backup.sh';
       echo 'Restore: docker exec blackbox-backup /bin/bash /usr/local/bin/restore.sh <backup_name>';
@@ -168,6 +176,3 @@ networks:
   internal:
     driver: bridge
     internal: true
-  challenge_network:
-    driver: bridge
-    name: ctf_challenges

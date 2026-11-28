@@ -261,7 +261,7 @@ class ContainerOrchestrator:
         options = {
             'name': instance.container_name,
             'detach': True,
-            'network': 'ctf_challenges',
+            'network': self.CHALLENGE_NETWORK,
             'environment': {
                 'CTF_USER_ID': str(instance.user_id),
                 'CTF_CHALLENGE_ID': str(instance.challenge_id),
@@ -295,7 +295,38 @@ class ContainerOrchestrator:
         target_port = next(iter(config.get('ExposedPorts') or {}), '80/tcp')
         return target_port if '/' in target_port else f'{target_port}/tcp'
 
+    CHALLENGE_NETWORK = 'ctf_challenges'
+
+    def _ensure_challenge_network(self):
+        """Give challenge instances a bridge network with inter-container traffic off.
+
+        With enable_icc=false one instance cannot reach another over the bridge,
+        and the app is not attached to it; players still use published ports.
+        A network created earlier with ICC on is recreated once nothing is
+        attached to it; until then a warning is logged.
+        """
+        name = self.CHALLENGE_NETWORK
+        try:
+            network = next((n for n in self.docker_client.networks.list(names=[name]) if n.name == name), None)
+            if network is not None:
+                network.reload()
+                if (network.attrs.get('Options') or {}).get('com.docker.network.bridge.enable_icc') == 'false':
+                    return
+                if network.attrs.get('Containers'):
+                    current_app.logger.warning(
+                        f'Docker network {name} allows inter-container traffic; it will be recreated '
+                        'isolated once no containers are attached')
+                    return
+                network.remove()
+            self.docker_client.networks.create(
+                name, driver='bridge', labels={'ctf.managed': 'true'},
+                options={'com.docker.network.bridge.enable_icc': 'false'})
+        except Exception as error:
+            current_app.logger.error(f'Could not ensure isolated challenge network {name}: {error}')
+
     def _run_with_pull(self, image, options):
+        if options.get('network') == self.CHALLENGE_NETWORK:
+            self._ensure_challenge_network()
         try:
             return self.docker_client.containers.run(image, **options)
         except docker.errors.ImageNotFound:
@@ -514,7 +545,7 @@ class ContainerOrchestrator:
             for image in images:
                 for tag in image.tags:
                     # Check if allowed
-                    if allowed_repos and not any(tag.startswith(repo) for repo in allowed_repos):
+                    if allowed_repos and not any(DockerSettings.image_matches(tag, repo) for repo in allowed_repos):
                         continue
                     
                     result.append({

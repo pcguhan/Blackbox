@@ -89,10 +89,12 @@ class ScoringService:
         return (base_points if override is None else override) + (bonus if is_first_blood else 0)
 
     @staticmethod
-    def get_challenge_solve_counts(team_based):
+    def get_challenge_solve_counts(team_based, challenge_id=None):
         """Get solve counts by challenge for the selected competition mode."""
         owner = Solve.team_id if team_based else Solve.user_id
         solves = Solve.participant_solves().filter(Solve.challenge_id.is_not(None), owner.is_not(None))
+        if challenge_id is not None:
+            solves = solves.filter(Solve.challenge_id == challenge_id)
         if not team_based:
             solves = solves.filter(User.is_admin.is_not(True))
         return dict(solves.with_entities(
@@ -121,13 +123,20 @@ class ScoringService:
         challenges = {challenge.id: challenge for challenge in Challenge.query.all()}
         solves = Solve.participant_solves().with_entities(
             Solve.user_id, Solve.team_id, Solve.challenge_id, Solve.points_earned,
-            Solve.base_points_override, Solve.is_first_blood, Solve.solved_at,
+            Solve.base_points_override, Solve.is_first_blood, Solve.solved_at, User.is_admin,
         ).all()
 
-        counts = defaultdict(int)
+        # Dynamic value counts the entrants of the competition mode (not the
+        # board being requested), so every view agrees on a challenge's value.
+        # Same rule as get_challenge_solve_counts, from the rows already loaded.
+        mode_teams = Settings.get('teams_enabled', True, type='bool')
+        owners = defaultdict(set)
         for solve in solves:
-            if solve.challenge_id is not None:
-                counts[solve.challenge_id] += 1
+            owner = solve.team_id if mode_teams else solve.user_id
+            if solve.challenge_id is None or owner is None or (not mode_teams and solve.is_admin):
+                continue
+            owners[solve.challenge_id].add(owner)
+        counts = defaultdict(int, {cid: len(ids) for cid, ids in owners.items()})
         decay = ScoringService.decay_function()
         bonus = ScoringService.first_blood_bonus()
         values = {cid: ScoringService.calculate_dynamic_points(challenge, counts[cid], decay)

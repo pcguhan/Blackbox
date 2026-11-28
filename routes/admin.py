@@ -1201,7 +1201,7 @@ def update_event_config():
         for key, description in (
             ('allow_registration', 'Allow new user registrations'),
             ('teams_enabled', 'Enable teams feature'),
-            ('team_mode', 'Require teams to solve challenges'),
+            ('require_team_for_challenges', 'Require teams to solve challenges'),
             ('scoreboard_visible', 'Show scoreboard to users'),
         ):
             if key in form:
@@ -1308,6 +1308,7 @@ def update_system_settings():
         
         # Update timezone
         timezone = request.form.get('timezone', 'UTC')
+        old_timezone = Settings.get('timezone', 'UTC')
         Settings.set('timezone', timezone, 'string', 'Platform timezone')
         
         # Update backup frequency
@@ -1320,7 +1321,8 @@ def update_system_settings():
             Settings.set('last_auto_backup', None, 'datetime', 'Last automatic backup timestamp')
         
         # Reschedule backups if frequency changed
-        if backup_frequency != old_frequency and backup_scheduler is not None:
+        # Jobs run in the event timezone, so a timezone change also reschedules.
+        if (backup_frequency != old_frequency or timezone != old_timezone) and backup_scheduler is not None:
             backup_scheduler.reschedule()
         
         flash('System settings updated successfully!', 'success')
@@ -1568,6 +1570,12 @@ def add_prerequisite():
     if not challenge_id or not prerequisite_challenge_id:
         return jsonify({'success': False, 'message': 'Both challenge and prerequisite are required'}), 400
     
+    try:
+        challenge_id = int(challenge_id)
+        prerequisite_challenge_id = int(prerequisite_challenge_id)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': 'Invalid challenge id'}), 400
+
     # Check if same challenge
     if challenge_id == prerequisite_challenge_id:
         return jsonify({'success': False, 'message': 'A challenge cannot be a prerequisite of itself'}), 400
@@ -1588,8 +1596,26 @@ def add_prerequisite():
     if existing:
         return jsonify({'success': False, 'message': 'This prerequisite already exists'}), 400
     
-    # TODO: Check for circular dependencies
-    
+    # Reject circular dependencies: "challenge requires prereq" closes a cycle if
+    # prereq already (transitively) requires challenge, which would leave every
+    # challenge in the cycle permanently locked.
+    requires = {}
+    for row_challenge, row_prereq in db.session.query(
+            ChallengePrerequisite.challenge_id, ChallengePrerequisite.prerequisite_challenge_id):
+        requires.setdefault(row_challenge, set()).add(row_prereq)
+    stack, visited = [prerequisite_challenge_id], set()
+    while stack:
+        node = stack.pop()
+        if node == challenge_id:
+            return jsonify({
+                'success': False,
+                'message': f'Circular prerequisite: "{prereq_challenge.name}" already depends on "{challenge.name}"'
+            }), 400
+        if node in visited:
+            continue
+        visited.add(node)
+        stack.extend(requires.get(node, ()))
+
     # Create prerequisite
     new_prereq = ChallengePrerequisite(
         challenge_id=challenge_id,
@@ -2032,24 +2058,11 @@ def create_backup():
             rows = cursor.fetchall()
             
             if rows:
+                from services.backup_sql import insert_statement
                 cursor.execute(f"DESCRIBE `{table}`")
-                columns = ', '.join(f'`{col[0]}`' for col in cursor.fetchall())
-                
+                columns = [col[0] for col in cursor.fetchall()]
                 for row in rows:
-                    values = []
-                    for value in row:
-                        if value is None:
-                            values.append('NULL')
-                        elif isinstance(value, (int, float)):
-                            values.append(str(value))
-                        elif isinstance(value, datetime):
-                            values.append(f"'{value.isoformat()}'")
-                        else:
-                            # Escape single quotes
-                            escaped = str(value).replace("'", "''")
-                            values.append(f"'{escaped}'")
-                    
-                    sql_dump.append(f"INSERT INTO `{table}` ({columns}) VALUES ({', '.join(values)});")
+                    sql_dump.append(insert_statement(table, columns, row))
         
         sql_dump.append("SET FOREIGN_KEY_CHECKS=1;")
         
