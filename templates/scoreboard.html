@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Leaderboard - {{ ctf_name }}{% endblock %}
-{% block extra_css %}<link rel="stylesheet" href="{{ url_for('static', filename='css/scoreboard.css') }}">{% endblock %}
+{% block extra_css %}<link rel="stylesheet" href="{{ url_for('static', filename='css/scoreboard.css', v=2) }}">{% endblock %}
 {% block content %}
 <div class="leaderboard-heading">
     <h1 id="leaderboardTitle">{% if teams_enabled %}Team leaderboard{% else %}Individual leaderboard{% endif %}</h1>

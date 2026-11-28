@@ -32,13 +32,6 @@
 :root[data-font="verdana"] { --bs-font-sans-serif: Verdana, Geneva, sans-serif; }
 :root[data-font="courier"] { --bs-font-sans-serif: "Courier New", Courier, monospace; }
 
-.technology-background::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background-color: rgba(var(--panel-rgb), .8);
-}
-
 body .container.site-shell {
     width: calc(100% - 2 * clamp(16px, 3vw, 48px));
     max-width: none;

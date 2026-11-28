@@ -1,5 +1,9 @@
 .leaderboard-stage {
-    background: rgba(var(--panel-rgb), .76);
+    background: rgb(var(--panel-rgb));
+}
+
+.leaderboard-mark {
+    opacity: .3;
 }
 
 .your-standing {
